@@ -1,8 +1,5 @@
+venv/
+*.traducoes.json
+*-ptbr.html
 __pycache__/
 *.pyc
-.env
-models/
-traducoes.json
-output/
-*.html
-!example/

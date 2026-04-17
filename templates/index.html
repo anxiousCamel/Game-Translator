@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Game Translator - Command Center</title>
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800&family=Rajdhani:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/@phosphor-icons/web"></script>
+  
+  <style>
+    :root {
+      --bg-dark: #0a0e17;
+      --bg-card: #131820;
+      
+      --accent: #00d9ff;
+      --accent-dim: rgba(0, 217, 255, 0.15);
+      --accent-glow: rgba(0, 217, 255, 0.4);
+      
+      --success: #00ff88;
+      --error: #ff4757;
+      
+      --text-primary: #e8edf4;
+      --text-secondary: #8b95a8;
+      
+      --border: rgba(255, 255, 255, 0.08);
+    }
+
+    *, *::before, *::after { 
+      box-sizing: border-box; 
+      margin: 0; 
+      padding: 0; 
+    }
+
+    body {
+      font-family: 'Rajdhani', sans-serif;
+      background: linear-gradient(135deg, #0a0e17 0%, #151b26 100%);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 24px;
+    }
+
+    .app-container {
+      width: 100%;
+      max-width: 720px;
+      background: var(--bg-card);
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      padding: 32px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    }
+
+    /* --- Header --- */
+    .header { 
+      margin-bottom: 32px;
+      text-align: center;
+    }
+    .header h1 { 
+      font-family: 'Orbitron', sans-serif;
+      font-size: 1.8rem; 
+      font-weight: 700; 
+      letter-spacing: 1px;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+    }
+    .header p { 
+      color: var(--text-secondary); 
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+
+    /* --- Sections --- */
+    .section {
+      margin-bottom: 24px;
+    }
+    .section:last-child {
+      margin-bottom: 0;
+    }
+    
+    .section-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      margin-bottom: 10px;
+      display: block;
+    }
+
+    /* --- Form Controls --- */
+    .input-group {
+      display: flex;
+      gap: 8px;
+    }
+    
+    .input-field {
+      flex: 1;
+      background: var(--bg-dark);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+      padding: 12px 16px;
+      font-size: 0.95rem;
+      font-family: 'Fira Code', monospace;
+      outline: none;
+      border-radius: 8px;
+      transition: all 0.2s ease;
+    }
+    .input-field::placeholder { 
+      color: var(--text-secondary); 
+      opacity: 0.6;
+    }
+    .input-field:focus {
+      border-color: var(--accent);
+      background: rgba(0, 217, 255, 0.05);
+    }
+
+    select.input-field {
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 600;
+      cursor: pointer;
+      appearance: none;
+      background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%238b95a8%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.4-12.8z%22%2F%3E%3C%2Fsvg%3E');
+      background-repeat: no-repeat;
+      background-position: right 14px top 50%;
+      background-size: 10px auto;
+      padding-right: 40px;
+    }
+
+    /* --- Buttons --- */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 12px 20px;
+      border: none;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: 'Rajdhani', sans-serif;
+      transition: all 0.2s ease;
+      border-radius: 8px;
+    }
+    .btn:active:not(:disabled) { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    
+    .btn-secondary {
+      background: var(--bg-dark);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover:not(:disabled) {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: var(--accent);
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #000;
+      padding: 14px 24px;
+      font-size: 1rem;
+      font-weight: 700;
+      width: 100%;
+      box-shadow: 0 4px 12px rgba(0, 217, 255, 0.3);
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: #00eeff;
+      box-shadow: 0 6px 20px rgba(0, 217, 255, 0.4);
+    }
+
+    /* --- Grid for Options --- */
+    .options-grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr 1fr;
+      gap: 12px;
+    }
+    .option-group { 
+      display: flex; 
+      flex-direction: column; 
+      gap: 8px; 
+    }
+    .option-label {
+      font-size: 0.7rem;
+      font-weight: 700;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    /* --- Badge --- */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 6px 12px;
+      background: var(--accent-dim);
+      color: var(--accent);
+      border-radius: 6px;
+      border: 1px solid rgba(0, 217, 255, 0.3);
+    }
+    .badge.hidden { display: none; }
+    .pulse-dot {
+      width: 6px; 
+      height: 6px;
+      background-color: var(--accent);
+      border-radius: 50%;
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    /* --- Log Area --- */
+    #log {
+      background: var(--bg-dark);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      height: 200px;
+      overflow-y: auto;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.85rem;
+      line-height: 1.6;
+      color: var(--text-secondary);
+    }
+
+    #log::-webkit-scrollbar { width: 6px; }
+    #log::-webkit-scrollbar-track { background: transparent; }
+    #log::-webkit-scrollbar-thumb { 
+      background: var(--border); 
+      border-radius: 3px;
+    }
+    #log::-webkit-scrollbar-thumb:hover { 
+      background: rgba(255, 255, 255, 0.15); 
+    }
+    
+    .log-line {
+      margin-bottom: 4px;
+    }
+    .log-ok   { color: var(--success); }
+    .log-err  { color: var(--error); }
+    .log-info { color: var(--accent); }
+
+    /* --- Progress --- */
+    .progress-container { 
+      display: flex; 
+      flex-direction: column; 
+      gap: 8px; 
+    }
+    .progress-label {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+    .progress-track {
+      height: 6px;
+      background: var(--bg-dark);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+      transition: width 0.3s ease;
+      border-radius: 3px;
+    }
+    
+    .progress-fill.done { background: var(--success); }
+    .progress-fill.error { background: var(--error); }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      .options-grid { 
+        grid-template-columns: 1fr; 
+      }
+      .input-group { 
+        flex-direction: column; 
+      }
+      .app-container {
+        padding: 24px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<div class="app-container">
+
+  <div class="header">
+    <h1>Game Translator</h1>
+    <p>Twine • RenPy • RPGMaker</p>
+  </div>
+
+  <!-- File Selection -->
+  <div class="section">
+    <label class="section-label">Game Path</label>
+    <div class="input-group">
+      <input id="path-input" type="text" class="input-field" placeholder="Select game folder or file..." />
+      <button class="btn btn-secondary" onclick="browse('folder')" title="Select Folder">
+        <i class="ph ph-folder-open"></i>
+      </button>
+      <button class="btn btn-secondary" onclick="browse('file')" title="Select File">
+        <i class="ph ph-file"></i>
+      </button>
+    </div>
+    
+    <div style="margin-top: 8px;">
+      <div class="badge hidden" id="detected-badge">
+        <span class="pulse-dot"></span>
+        <span id="detected-label"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Options -->
+  <div class="section">
+    <label class="section-label">Translation Settings</label>
+    <div class="options-grid">
+      <div class="option-group">
+        <span class="option-label">Game Type</span>
+        <select id="game-type" class="input-field">
+          <option value="">Auto Detect</option>
+          <option value="twine">Twine / SugarCube</option>
+          <option value="renpy">RenPy</option>
+          <option value="rpgmaker">RPGMaker MV/MZ</option>
+        </select>
+      </div>
+
+      <div class="option-group">
+        <span class="option-label">From</span>
+        <select id="src-lang" class="input-field">
+          <option value="en">English</option>
+          <option value="pt">Portuguese</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+          <option value="de">German</option>
+          <option value="it">Italian</option>
+          <option value="ru">Russian</option>
+          <option value="ja">Japanese</option>
+          <option value="zh">Chinese</option>
+          <option value="ko">Korean</option>
+        </select>
+      </div>
+
+      <div class="option-group">
+        <span class="option-label">To</span>
+        <select id="tgt-lang" class="input-field">
+          <option value="en">English</option>
+          <option value="pt" selected>Portuguese</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+          <option value="de">German</option>
+          <option value="it">Italian</option>
+          <option value="ru">Russian</option>
+          <option value="ja">Japanese</option>
+          <option value="zh">Chinese</option>
+          <option value="ko">Korean</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="section">
+    <label class="section-label">Console</label>
+    <div id="log">Ready...</div>
+  </div>
+
+  <!-- Progress & Action -->
+  <div class="section">
+    <div class="progress-container">
+      <div class="progress-label" id="status-label">Waiting for input</div>
+      <div class="progress-track">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+    </div>
+    
+    <button class="btn btn-primary" id="translate-btn" onclick="startTranslation()" style="margin-top: 16px;">
+      <i class="ph ph-play" id="btn-icon"></i>
+      <span id="btn-text">Start Translation</span>
+    </button>
+  </div>
+
+</div>
+
+<script>
+  let logCount = 0;
+  let polling = false;
+
+  const pathInput = document.getElementById("path-input");
+  pathInput.addEventListener("change", () => detectType(pathInput.value.trim()));
+  pathInput.addEventListener("blur", () => detectType(pathInput.value.trim()));
+
+  async function browse(kind) {
+    try {
+      const res = await fetch("/browse", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({kind}),
+      });
+      const data = await res.json();
+      if (data.path) {
+        pathInput.value = data.path;
+        detectType(data.path);
+      }
+    } catch(err) {
+      console.error(err);
+    }
+  }
+
+  async function detectType(path) {
+    if (!path) {
+      document.getElementById("detected-badge").classList.add("hidden");
+      return;
+    }
+    const res = await fetch("/detect", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({path}),
+    });
+    const data = await res.json();
+    const badge = document.getElementById("detected-badge");
+    const label = document.getElementById("detected-label");
+    
+    if (data.type) {
+      label.textContent = data.label;
+      badge.classList.remove("hidden");
+      document.getElementById("game-type").value = data.type;
+    } else {
+      badge.classList.add("hidden");
+    }
+  }
+
+  async function startTranslation() {
+    const path = pathInput.value.trim();
+    if (!path) {
+      appendLog("Error: No game path specified", "err");
+      pathInput.focus();
+      return;
+    }
+
+    if (!document.getElementById("game-type").value) {
+      await detectType(path);
+    }
+
+    const payload = {
+      path,
+      game_type: document.getElementById("game-type").value,
+      src_lang: document.getElementById("src-lang").value,
+      tgt_lang: document.getElementById("tgt-lang").value,
+    };
+
+    const res = await fetch("/translate", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.error) { 
+      appendLog("Error: " + data.error, "err"); 
+      return; 
+    }
+
+    setTranslating(true);
+    startPolling();
+  }
+
+  function startPolling() {
+    if (polling) return;
+    polling = true;
+    const id = setInterval(async () => {
+      const res = await fetch("/status?since=" + logCount);
+      const data = await res.json();
+
+      data.logs.forEach(([msg, cls]) => appendLog(msg, cls));
+      logCount = data.log_count;
+
+      setProgress(data.progress, data.status_label);
+
+      if (!data.running) {
+        clearInterval(id);
+        polling = false;
+        setTranslating(false);
+        setProgress(data.progress, data.status_label, data.error ? "error" : "done");
+      }
+    }, 500);
+  }
+
+  function appendLog(msg, cls = "") {
+    const box = document.getElementById("log");
+    const div = document.createElement("div");
+    div.className = "log-line";
+    if (cls) div.classList.add("log-" + cls);
+    div.textContent = msg;
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function setProgress(value, label, state = "") {
+    const fill = document.getElementById("progress-fill");
+    fill.style.width = (value * 100) + "%";
+    fill.className = "progress-fill" + (state ? " " + state : "");
+    document.getElementById("status-label").textContent = label || "Waiting...";
+  }
+
+  function setTranslating(on) {
+    const btn = document.getElementById("translate-btn");
+    const icon = document.getElementById("btn-icon");
+    const text = document.getElementById("btn-text");
+    btn.disabled = on;
+    
+    if (on) {
+      icon.className = "ph ph-spinner ph-spin";
+      text.textContent = "Translating...";
+    } else {
+      icon.className = "ph ph-play";
+      text.textContent = "Start Translation";
+    }
+  }
+</script>
+</body>
+</html>
