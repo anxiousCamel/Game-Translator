@@ -31,6 +31,9 @@ _SAFE_NAME_FILES = {"Actors", "Classes", "Troops", "MapInfos"}
 # Codigos de controle do RPGMaker: \n[1], \c[3], \v[1], etc.
 _CTRL_RE = re.compile(r"\\[a-zA-Z]\[\d+\]|\\[!>.<^{}\\|]|\\n")
 
+# Separadores de secao em arquivos .txt de dialogo (////... linhas)
+_TXT_SEP_RE = re.compile(r"^/{5,}")
+
 
 class RPGMakerTranslator(BaseTranslator):
     def translate(self) -> Path:
@@ -51,7 +54,7 @@ class RPGMakerTranslator(BaseTranslator):
             rel = lsrc.relative_to(self.path) if lsrc.is_relative_to(self.path) else lsrc
             self.log(f"Plugin de localizacao detectado: {rel}")
             # Backup locale source so re-runs always translate from original
-            if locale_info["type"] == "dir":
+            if locale_info["type"] in ("dir", "txt_dir"):
                 lbackup = lsrc.parent / f"{lsrc.name}-original"
                 if not lbackup.exists():
                     shutil.copytree(lsrc, lbackup)
@@ -195,6 +198,17 @@ def _detect_locale_plugin(game_path: Path, src_lang: str) -> dict | None:
             except Exception:
                 pass
 
+    # Pattern 6: custom dialog/ folder with language subdirs of .txt files
+    # Used by ExternalDialogue / ExternalDB style plugins (e.g. dialog/ko/, dialog/en/)
+    for root in (game_path / "www", game_path):
+        dialog_dir = root / "dialog"
+        if not dialog_dir.is_dir():
+            continue
+        for lk in lang_variants:
+            src_dir = dialog_dir / lk
+            if src_dir.is_dir() and list(src_dir.glob("*.txt")):
+                return {"type": "txt_dir", "src": src_dir}
+
     return None
 
 
@@ -256,6 +270,20 @@ def _collect_locale_texts(locale_info: dict) -> list[str]:
             _walk_locale_collect(section, add)
         except Exception:
             pass
+    elif locale_info["type"] == "txt_dir":
+        for txt in sorted(src.glob("*.txt")):
+            try:
+                for line in txt.read_text(encoding="utf-8", errors="replace").splitlines():
+                    stripped = line.strip()
+                    if not stripped or _TXT_SEP_RE.match(stripped):
+                        continue
+                    # Strip * narrative prefix before registering for translation
+                    text = stripped[1:].strip() if stripped.startswith("*") else stripped
+                    clean = _strip_ctrl(text)
+                    if clean and len(clean) > 2:
+                        add(clean)
+            except Exception:
+                pass
 
     return result
 
@@ -300,6 +328,33 @@ def _apply_locale_translations(locale_info: dict, cache: dict, log) -> None:
             )
         except Exception as e:
             log(f"  Aviso: {src.name} mantido ({e})")
+
+    elif locale_info["type"] == "txt_dir":
+        # Line-position must be preserved — each line = one game message box.
+        for txt_backup in sorted(backup.glob("*.txt")):
+            txt_live = src / txt_backup.name
+            try:
+                lines = txt_backup.read_text(encoding="utf-8", errors="replace").splitlines()
+                new_lines: list[str] = []
+                for line in lines:
+                    stripped = line.strip()
+                    # Preserve empty lines and ////... separators verbatim
+                    if not stripped or _TXT_SEP_RE.match(stripped):
+                        new_lines.append(line)
+                        continue
+                    # Detect and preserve * narrative prefix
+                    if stripped.startswith("*"):
+                        prefix = "* "
+                        text = stripped[1:].strip()
+                    else:
+                        prefix = ""
+                        text = stripped
+                    clean = _strip_ctrl(text)
+                    translated = cache.get(clean)
+                    new_lines.append(prefix + translated if translated else line)
+                txt_live.write_text("\n".join(new_lines), encoding="utf-8")
+            except Exception as e:
+                log(f"  Aviso: {txt_backup.name} mantido ({e})")
 
 
 # ---------------------------------------------------------------------------
