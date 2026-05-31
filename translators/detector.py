@@ -1,4 +1,6 @@
 from __future__ import annotations
+import json
+import re
 from pathlib import Path
 
 
@@ -58,3 +60,91 @@ GAME_TYPE_LABELS = {
     "renpy": "RenPy",
     "rpgmaker": "RPGMaker MV/MZ",
 }
+
+
+# ---------------------------------------------------------------------------
+# Text sampling for language detection
+# ---------------------------------------------------------------------------
+
+_RENPY_DIALOG_RE = re.compile(r'^\s+(?:\w+\s+)?"((?:[^"\\]|\\.)+)"', re.MULTILINE)
+_TWINE_PASSAGE_RE = re.compile(r'<tw-passagedata[^>]*>(.*?)</tw-passagedata>', re.DOTALL)
+
+
+def _collect_strings(obj: object, out: list[str], limit: int) -> None:
+    if len(out) >= limit:
+        return
+    if isinstance(obj, str):
+        if obj.strip():
+            out.append(obj)
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_strings(item, out, limit)
+            if len(out) >= limit:
+                return
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _collect_strings(v, out, limit)
+            if len(out) >= limit:
+                return
+
+
+def sample_game_texts(path: Path, game_type: str, n: int = 200) -> list[str]:
+    """Return up to n raw strings from game files for language detection."""
+    try:
+        if game_type == "rpgmaker":
+            return _sample_rpgmaker(path, n)
+        if game_type == "renpy":
+            return _sample_renpy(path, n)
+        if game_type == "twine":
+            return _sample_twine(path, n)
+    except Exception:
+        pass
+    return []
+
+
+def _sample_rpgmaker(path: Path, n: int) -> list[str]:
+    data_dir = next(
+        (d for d in [path / "www" / "data", path / "data"] if d.is_dir()), None
+    )
+    if not data_dir:
+        return []
+    texts: list[str] = []
+    for jf in sorted(data_dir.glob("*.json"))[:8]:
+        try:
+            obj = json.loads(jf.read_text(encoding="utf-8", errors="ignore"))
+            _collect_strings(obj, texts, n)
+        except Exception:
+            pass
+        if len(texts) >= n:
+            break
+    return texts[:n]
+
+
+def _sample_renpy(path: Path, n: int) -> list[str]:
+    rpy_files = list(path.glob("**/*.rpy"))[:12]
+    texts: list[str] = []
+    for rpy in rpy_files:
+        try:
+            content = rpy.read_text(encoding="utf-8", errors="ignore")
+            for m in _RENPY_DIALOG_RE.finditer(content):
+                texts.append(m.group(1))
+        except Exception:
+            pass
+        if len(texts) >= n:
+            break
+    return texts[:n]
+
+
+def _sample_twine(path: Path, n: int) -> list[str]:
+    files = [path] if path.is_file() else (list(path.glob("*.html")) + list(path.glob("*.htm")))
+    texts: list[str] = []
+    for f in files[:3]:
+        try:
+            content = f.read_text(encoding="utf-8", errors="ignore")[:800_000]
+            for m in _TWINE_PASSAGE_RE.finditer(content):
+                texts.append(m.group(1)[:300])
+        except Exception:
+            pass
+        if len(texts) >= n:
+            break
+    return texts[:n]

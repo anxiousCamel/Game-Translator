@@ -8,6 +8,64 @@ from pathlib import Path
 from typing import Callable
 
 # ---------------------------------------------------------------------------
+# Language detection helpers
+# ---------------------------------------------------------------------------
+
+# Strips formatting codes before feeding text to langid:
+#   RPGMaker: \c[3]  \v[1]  \n  \!  \>  etc.
+#   RenPy:    {b}  {/b}  {color=#fff}  [variable]
+#   HTML/Twine: <span>  &amp;
+_LANG_STRIP_RE = re.compile(
+    r"\\[a-zA-Z]\[\d+\]"   # \c[3]  \v[1]
+    r"|\\[!>.<^{}\\|n]"    # \!  \n  \>  etc.
+    r"|\{[^}]*\}"           # {b}  {/b}  {color=…}
+    r"|\[[^\]]*\]"          # [variable]
+    r"|<[^>]+>"             # <span>  <br>
+    r"|&\w+;"               # &amp;  &lt;
+)
+
+
+def _strip_for_detect(s: str) -> str:
+    return _LANG_STRIP_RE.sub("", s).strip()
+
+
+def _is_dialog_like(s: str) -> bool:
+    s = _strip_for_detect(s)
+    if len(s) < 8:
+        return False
+    # Pure identifier / path / variable name → not dialog
+    if re.match(r'^[\w\.\$\#\/\\:\-]+$', s):
+        return False
+    return True
+
+
+def detect_source_language(texts: list[str], sample_size: int = 50) -> str | None:
+    """Return ISO 639-1 language code detected from a sample of game texts, or None."""
+    try:
+        import langid
+    except ImportError:
+        return None
+
+    from collections import Counter
+    samples = [_strip_for_detect(t) for t in texts if _is_dialog_like(t)][:sample_size]
+    if not samples:
+        return None
+
+    votes: Counter = Counter()
+    for s in samples:
+        try:
+            lang, _ = langid.classify(s)
+            votes[lang] += 1
+        except Exception:
+            pass
+
+    if not votes:
+        return None
+    winner, count = votes.most_common(1)[0]
+    return winner if (count / len(samples)) >= 0.4 else None
+
+
+# ---------------------------------------------------------------------------
 # Hardware auto-detection
 # ---------------------------------------------------------------------------
 

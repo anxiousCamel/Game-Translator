@@ -7,3 +7,4 @@ psutil
 flask
 unrpa
 customtkinter
+langid

@@ -10,8 +10,8 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from translators.detector import detect_game_type, GAME_TYPE_LABELS
-from translators.engine import _hw_config, _gpu_libs_dir, _GPU_KEY_DLL, download_gpu_libs
+from translators.detector import detect_game_type, GAME_TYPE_LABELS, sample_game_texts
+from translators.engine import _hw_config, _gpu_libs_dir, _GPU_KEY_DLL, download_gpu_libs, detect_source_language
 from translators.twine import TwineTranslator
 from translators.renpy import RenpyTranslator
 from translators.rpgmaker import RPGMakerTranslator
@@ -265,9 +265,31 @@ class App(ctk.CTk):
                 if key == detected:
                     self.type_var.set(name)
                     break
-            self._log(f"Detectado: {label}")
+            self._log(f"Detectado: {label} — analisando idioma...")
+            threading.Thread(
+                target=self._detect_lang_async, args=(path, detected), daemon=True
+            ).start()
         else:
             self._log("Tipo nao detectado — selecione manualmente.")
+
+    def _detect_lang_async(self, path: Path, game_type: str):
+        try:
+            texts = sample_game_texts(path, game_type)
+            lang_code = detect_source_language(texts)
+            if lang_code:
+                for name, code in LANGUAGES.items():
+                    if code == lang_code:
+                        self.after(0, lambda n=name: self.src_var.set(n))
+                        self.after(
+                            0,
+                            lambda c=lang_code: self._log(
+                                f"Idioma de origem detectado: {c.upper()} (editavel)"
+                            ),
+                        )
+                        return
+            self.after(0, lambda: self._log("Idioma nao detectado — selecione manualmente."))
+        except Exception:
+            pass
 
     def _log(self, msg: str):
         self.log_box.configure(state="normal")
