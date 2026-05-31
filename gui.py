@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
 from translators.detector import detect_game_type, GAME_TYPE_LABELS
+from translators.engine import _hw_config, _gpu_libs_dir, _GPU_KEY_DLL, download_gpu_libs
 from translators.twine import TwineTranslator
 from translators.renpy import RenpyTranslator
 from translators.rpgmaker import RPGMakerTranslator
@@ -53,6 +54,7 @@ class App(ctk.CTk):
         self.minsize(560, 520)
         self._translating = False
         self._build_ui()
+        self.after(800, self._check_gpu_prompt)
 
     # ------------------------------------------------------------------
     # Layout
@@ -183,6 +185,60 @@ class App(ctk.CTk):
     # Acoes
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # GPU acceleration
+    # ------------------------------------------------------------------
+
+    def _check_gpu_prompt(self):
+        gpu_dir = _gpu_libs_dir()
+        key_dll = gpu_dir / _GPU_KEY_DLL
+        if key_dll.exists():
+            return  # already downloaded
+        hw = _hw_config()
+        if hw["device"] == "cuda":
+            self._show_gpu_dialog()
+
+    def _show_gpu_dialog(self):
+        answer = messagebox.askyesno(
+            "Aceleracao GPU detectada",
+            "Placa de video NVIDIA detectada!\n\n"
+            "Deseja baixar o Pacote de Aceleracao de Hardware (~500 MB) "
+            "para traduzir significativamente mais rapido?\n\n"
+            "O download pode demorar alguns minutos dependendo da sua conexao.",
+            icon="question",
+        )
+        if answer:
+            self._start_gpu_download()
+
+    def _start_gpu_download(self):
+        self.translate_btn.configure(state="disabled", text="Baixando GPU...")
+        self._log("\n--- Baixando Pacote de Aceleracao GPU ---")
+
+        def run():
+            success = download_gpu_libs(
+                log_fn=lambda msg: self.after(0, lambda m=msg: self._log(m)),
+                progress_fn=lambda v, l=None: self.after(
+                    0, lambda vv=v, ll=l: self._set_progress(vv, ll)
+                ),
+            )
+
+            def done():
+                self.translate_btn.configure(state="normal", text="Traduzir Agora")
+                if success:
+                    self._log("GPU pronta! A proxima traducao usara aceleracao por GPU.\n")
+                    self._set_progress(0, "Aguardando...")
+                else:
+                    self._log("Falha no download do pacote GPU. Traduzindo via CPU.\n")
+                    self._set_progress(0, "Aguardando...")
+
+            self.after(0, done)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Acoes
+    # ------------------------------------------------------------------
+
     def _select_folder(self):
         path = filedialog.askdirectory(title="Selecione a pasta do jogo")
         if path:
@@ -281,7 +337,8 @@ class App(ctk.CTk):
                 output = translator.translate()
                 self.after(0, lambda: self._log(f"\nConcluido! Saida:\n  {output}"))
             except Exception as exc:
-                self.after(0, lambda: self._log(f"\nErro: {exc}"))
+                _exc = exc
+                self.after(0, lambda e=_exc: self._log(f"\nErro: {e}"))
             finally:
                 self._translating = False
                 self.after(

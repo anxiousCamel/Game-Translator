@@ -3,3 +3,12 @@ venv/
 *-ptbr.html
 __pycache__/
 *.pyc
+
+# Downloaded CUDA runtime DLLs (on-demand, not versioned)
+gpu_libs/
+
+# Argos translation cache files generated per game
+traducoes_*.json
+
+# unrpyc tool (downloaded at runtime)
+_tools/

@@ -3,5 +3,7 @@ ctranslate2
 argostranslate
 sentencepiece
 sacremoses
+psutil
 flask
 unrpa
+customtkinter
