@@ -26,9 +26,11 @@ def detect_game_type(path: Path) -> str | None:
             return "renpy"
         if list(game_dir.glob("*.rpa")):
             return "renpy"
+        if list(game_dir.glob("*.rpyc")) or list(game_dir.rglob("*.rpyc")):
+            return "renpy"
     if (path / "renpy").is_dir():
         return "renpy"
-    if list(path.glob("**/*.rpy")):
+    if list(path.glob("**/*.rpy")) or list(path.glob("**/*.rpyc")):
         return "renpy"
 
     # Twine: arquivo HTML na pasta

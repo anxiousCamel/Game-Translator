@@ -1,4 +1,5 @@
 @echo off
+cd /d "%~dp0"
 echo ========================================
 echo  Game Translator - Inicializacao
 echo ========================================
@@ -12,15 +13,25 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "venv" (
-    echo [1/3] Criando ambiente virtual...
-    python -m venv venv
+if exist "venv" (
+    venv\Scripts\python.exe --version >nul 2>&1
     if errorlevel 1 (
-        echo ERRO ao criar ambiente virtual!
-        pause
-        exit /b 1
+        echo [1/3] Venv corrompido. Recriando...
+        rmdir /s /q venv
+    ) else (
+        echo [1/3] Ambiente virtual OK.
+        goto install
     )
+) else (
+    echo [1/3] Criando ambiente virtual...
 )
+python -m venv venv
+if errorlevel 1 (
+    echo ERRO ao criar ambiente virtual!
+    pause
+    exit /b 1
+)
+:install
 
 echo [2/3] Instalando dependencias...
 call venv\Scripts\activate.bat
