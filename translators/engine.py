@@ -247,6 +247,51 @@ def _fix_argos_perms() -> None:
 
 _lock = threading.Lock()
 _installed: set[tuple[str, str]] = set()
+_translation_paths: dict[tuple[str, str], list[str]] = {}
+
+
+def _check_hop_installed(src: str, tgt: str, installed_langs: list) -> bool:
+    src_l = next((l for l in installed_langs if l.code == src), None)
+    return src_l is not None and any(
+        getattr(t, "code", None) == tgt for t in src_l.translations_to
+    )
+
+
+def _find_hop_path(src: str, tgt: str, available: list) -> list[str] | None:
+    """Return [src, tgt] for direct or [src, pivot, tgt] for one-hop. None if unreachable."""
+    if any(p.from_code == src and p.to_code == tgt for p in available):
+        return [src, tgt]
+    src_dests = {p.to_code for p in available if p.from_code == src}
+    tgt_srcs = {p.from_code for p in available if p.to_code == tgt}
+    pivots = src_dests & tgt_srcs
+    if "en" in pivots:
+        return [src, "en", tgt]
+    if pivots:
+        return [src, min(pivots), tgt]
+    return None
+
+
+def _install_pkg(src: str, tgt: str, available: list, log_fn: Callable) -> None:
+    import argostranslate.package
+    pkg = next((p for p in available if p.from_code == src and p.to_code == tgt), None)
+    if not pkg:
+        raise ValueError(f"Pacote {src}->{tgt} nao encontrado no indice.")
+    log_fn(f"  Baixando {src}->{tgt}...")
+    downloaded = pkg.download()
+    for _attempt in range(10):
+        try:
+            argostranslate.package.install_from_path(downloaded)
+            break
+        except PermissionError as exc:
+            blocked = getattr(exc, "filename", None)
+            if blocked and os.path.isfile(blocked):
+                try:
+                    os.remove(blocked)
+                    continue
+                except OSError:
+                    pass
+            raise
+    log_fn(f"  {src}->{tgt} instalado.")
 
 
 def ensure_model(src: str, tgt: str, log_fn: Callable = print) -> None:
@@ -265,46 +310,45 @@ def ensure_model(src: str, tgt: str, log_fn: Callable = print) -> None:
         import argostranslate.translate
 
         log_fn(f"Verificando modelo {src} -> {tgt}...")
-        installed = argostranslate.translate.get_installed_languages()
-        src_lang = next((l for l in installed if l.code == src), None)
-        if src_lang:
-            tgt_match = next(
-                (t for t in src_lang.translations_to if getattr(t, "code", None) == tgt),
-                None,
-            )
-            if tgt_match:
-                _fix_argos_perms()
-                _installed.add(key)
-                log_fn(f"Modelo {src}->{tgt} ja instalado.")
-                return
+        installed_langs = argostranslate.translate.get_installed_languages()
 
-        log_fn(f"Baixando modelo {src}->{tgt} (aguarde na primeira vez)...")
-        _fix_argos_perms()  # unlock any leftover files from a previous partial install
+        # Fast path: direct pair already installed
+        if _check_hop_installed(src, tgt, installed_langs):
+            _fix_argos_perms()
+            _translation_paths[key] = [src, tgt]
+            _installed.add(key)
+            log_fn(f"Modelo {src}->{tgt} ja instalado.")
+            return
+
+        # Fetch package index to resolve path and install missing hops
+        log_fn(f"Resolvendo rota de traducao {src}->{tgt}...")
+        _fix_argos_perms()
         argostranslate.package.update_package_index()
         available = argostranslate.package.get_available_packages()
-        pkg = next((p for p in available if p.from_code == src and p.to_code == tgt), None)
-        if not pkg:
+
+        path = _find_hop_path(src, tgt, available)
+        if path is None:
+            src_opts = sorted({p.to_code for p in available if p.from_code == src})
             raise ValueError(
-                f"Modelo de traducao nao disponivel para {src}->{tgt}. "
-                "Verifique os idiomas selecionados."
+                f"Sem rota de traducao para {src}->{tgt}. "
+                f"Pares disponiveis de '{src}': {src_opts}"
             )
-        downloaded = pkg.download()
-        for _attempt in range(10):
-            try:
-                argostranslate.package.install_from_path(downloaded)
-                break
-            except PermissionError as exc:
-                blocked = getattr(exc, "filename", None)
-                if blocked and os.path.isfile(blocked):
-                    try:
-                        os.remove(blocked)
-                        continue
-                    except OSError:
-                        pass
-                raise
+
+        if len(path) == 3:
+            pivot = path[1]
+            log_fn(f"Modelo direto {src}->{tgt} indisponivel. Rota: {src}->{pivot}->{tgt}")
+            if not _check_hop_installed(src, pivot, installed_langs):
+                _install_pkg(src, pivot, available, log_fn)
+            if not _check_hop_installed(pivot, tgt, installed_langs):
+                _install_pkg(pivot, tgt, available, log_fn)
+        else:
+            log_fn(f"Baixando modelo {src}->{tgt} (aguarde na primeira vez)...")
+            _install_pkg(src, tgt, available, log_fn)
+
         _fix_argos_perms()
+        _translation_paths[key] = path
         _installed.add(key)
-        log_fn(f"Modelo {src}->{tgt} instalado com sucesso.")
+        log_fn(f"Modelo {src}->{tgt} pronto.")
 
 
 # ---------------------------------------------------------------------------
@@ -426,14 +470,10 @@ def _get_ct2(src: str, tgt: str) -> tuple:
 # True-batch translation (all texts → one ctranslate2.translate_batch call)
 # ---------------------------------------------------------------------------
 
-def translate_texts(texts: list[str], src: str, tgt: str, workers: int = 0) -> list[str]:
-    if not texts:
-        return []
-
+def _translate_single_pass(texts: list[str], src: str, tgt: str) -> list[str]:
     translator, tokenizer, tgt_prefix = _get_ct2(src, tgt)
     batch_size = _hw_config()["batch_size"]
 
-    # Sentence-split every text; track slice boundaries into the flat list
     all_sents: list[str] = []
     bounds: list[tuple[int, int]] = []
     for text in texts:
@@ -478,3 +518,14 @@ def translate_texts(texts: list[str], src: str, tgt: str, workers: int = 0) -> l
         translated.append(decoded if decoded else orig)
 
     return translated
+
+
+def translate_texts(texts: list[str], src: str, tgt: str, workers: int = 0) -> list[str]:
+    if not texts:
+        return []
+    path = _translation_paths.get((src, tgt), [src, tgt])
+    if len(path) == 3:
+        pivot = path[1]
+        intermediate = _translate_single_pass(texts, src, pivot)
+        return _translate_single_pass(intermediate, pivot, tgt)
+    return _translate_single_pass(texts, src, tgt)
