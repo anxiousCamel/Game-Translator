@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -511,7 +512,9 @@ class UnityTranslator(BaseTranslator):
             self.log(f"    [aviso] {path.name}: {e}")
             return 0
 
-        for obj in env.objects:
+        for i, obj in enumerate(env.objects):
+            if i % 50 == 0:
+                time.sleep(0.001)
             if obj.type.name in _SKIP_OBJ_TYPES:
                 continue
             try:
@@ -572,7 +575,9 @@ class UnityTranslator(BaseTranslator):
         except Exception:
             return False
 
-        for obj in env.objects:
+        for i, obj in enumerate(env.objects):
+            if i % 50 == 0:
+                time.sleep(0.001)
             if obj.type.name in _SKIP_OBJ_TYPES:
                 continue
             try:
@@ -792,6 +797,7 @@ class UnityTranslator(BaseTranslator):
                     for t in translated_safe
                 ]
                 cache.update(zip(batch, translated))
+                time.sleep(0.01)  # yield GIL to Tkinter thread between batches
                 cache_file.write_text(
                     json.dumps(cache, ensure_ascii=False, indent=2),
                     encoding="utf-8",

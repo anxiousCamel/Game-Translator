@@ -4,7 +4,10 @@ Game Translator — Interface grafica para traducao de jogos Twine, RenPy e RPGM
 """
 from __future__ import annotations
 
+import multiprocessing
+import queue
 import threading
+import time
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -48,6 +51,53 @@ TRANSLATORS = {
     "unity": UnityTranslator,
 }
 
+# ---------------------------------------------------------------------------
+# Worker (runs in a separate OS process — zero GIL sharing with UI)
+# ---------------------------------------------------------------------------
+
+def worker_process(
+    translator_cls,
+    path_str: str,
+    src_lang: str,
+    tgt_lang: str,
+    ipc_queue: "multiprocessing.Queue[tuple]",
+) -> None:
+    """
+    Instantiates and runs the translator completely outside the UI process.
+    Communicates back via tagged tuples on ipc_queue:
+      ("LOG",      msg: str)
+      ("PROGRESS", val: float, lbl: str | None)
+      ("DONE",     success: bool)
+    """
+    from pathlib import Path as _Path
+
+    def _log(msg: str) -> None:
+        ipc_queue.put(("LOG", msg))
+
+    def _progress(val: float, lbl: str | None = None) -> None:
+        ipc_queue.put(("PROGRESS", val, lbl))
+
+    try:
+        translator = translator_cls(
+            path=_Path(path_str),
+            src_lang=src_lang,
+            tgt_lang=tgt_lang,
+            log_fn=_log,
+            progress_fn=_progress,
+        )
+        output = translator.translate()
+        ipc_queue.put(("LOG", f"\nConcluido! Saida:\n  {output}"))
+        ipc_queue.put(("DONE", True))
+    except Exception as exc:
+        ipc_queue.put(("LOG", f"\nErro: {exc}"))
+        ipc_queue.put(("DONE", False))
+
+
+_BTN_DEFAULT = "#1F6AA5"   # CTk default blue
+_BTN_HOVER   = "#2980B9"   # lighter blue
+_BTN_BUSY    = "#3D3D3D"   # dark gray (disabled feel)
+_BTN_SUCCESS = "#3EA6FF"   # bright blue flash on success
+
 
 class App(ctk.CTk):
     def __init__(self):
@@ -56,8 +106,13 @@ class App(ctk.CTk):
         self.geometry("680x620")
         self.minsize(560, 520)
         self._translating = False
+        self._progress_indeterminate = False
+        self._last_progress_time = 0.0
+        self._ui_queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._proc_queue: multiprocessing.Queue | None = None
         self._build_ui()
         self.after(800, self._check_gpu_prompt)
+        self._poll_ui_queue()
 
     # ------------------------------------------------------------------
     # Layout
@@ -180,13 +235,50 @@ class App(ctk.CTk):
             text="Traduzir Agora",
             height=46,
             font=ctk.CTkFont(size=15, weight="bold"),
+            fg_color=_BTN_DEFAULT,
+            hover_color=_BTN_HOVER,
             command=self._start_translation,
         )
         self.translate_btn.grid(row=2, column=0, sticky="ew")
 
     # ------------------------------------------------------------------
-    # Acoes
+    # Thread-safe UI queue
     # ------------------------------------------------------------------
+
+    def _poll_ui_queue(self):
+        """Drain thread callbacks and process IPC messages in main thread at ~60 fps."""
+        # Thread-based callables (GPU download, lang detect, etc.)
+        try:
+            while True:
+                fn = self._ui_queue.get_nowait()
+                fn()
+        except queue.Empty:
+            pass
+
+        # Process-based IPC tuples (translator worker)
+        if self._proc_queue is not None:
+            try:
+                while True:
+                    msg = self._proc_queue.get_nowait()
+                    self._handle_proc_msg(msg)
+            except Exception:
+                pass
+
+        self.after(16, self._poll_ui_queue)
+
+    def _handle_proc_msg(self, msg: tuple) -> None:
+        tag = msg[0]
+        if tag == "LOG":
+            self._log(msg[1])
+        elif tag == "PROGRESS":
+            self._set_progress(msg[1], msg[2] if len(msg) > 2 else None)
+        elif tag == "DONE":
+            self._proc_queue = None
+            self._on_translation_done(msg[1])
+
+    def _schedule(self, fn):
+        """Enqueue a callable to run on the main thread. Safe from any thread."""
+        self._ui_queue.put(fn)
 
     # ------------------------------------------------------------------
     # GPU acceleration
@@ -219,9 +311,9 @@ class App(ctk.CTk):
 
         def run():
             success = download_gpu_libs(
-                log_fn=lambda msg: self.after(0, lambda m=msg: self._log(m)),
-                progress_fn=lambda v, l=None: self.after(
-                    0, lambda vv=v, ll=l: self._set_progress(vv, ll)
+                log_fn=lambda msg: self._schedule(lambda m=msg: self._log(m)),
+                progress_fn=lambda v, l=None: self._schedule(
+                    lambda vv=v, ll=l: self._set_progress(vv, ll)
                 ),
             )
 
@@ -234,7 +326,7 @@ class App(ctk.CTk):
                     self._log("Falha no download do pacote GPU. Traduzindo via CPU.\n")
                     self._set_progress(0, "Aguardando...")
 
-            self.after(0, done)
+            self._schedule(done)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -282,15 +374,14 @@ class App(ctk.CTk):
             if lang_code:
                 for name, code in LANGUAGES.items():
                     if code == lang_code:
-                        self.after(0, lambda n=name: self.src_var.set(n))
-                        self.after(
-                            0,
+                        self._schedule(lambda n=name: self.src_var.set(n))
+                        self._schedule(
                             lambda c=lang_code: self._log(
                                 f"Idioma de origem detectado: {c.upper()} (editavel)"
-                            ),
+                            )
                         )
                         return
-            self.after(0, lambda: self._log("Idioma nao detectado — selecione manualmente."))
+            self._schedule(lambda: self._log("Idioma nao detectado — selecione manualmente."))
         except Exception:
             pass
 
@@ -306,9 +397,27 @@ class App(ctk.CTk):
         self.log_box.configure(state="disabled")
 
     def _set_progress(self, value: float, label: str = None):
-        self.progress_bar.set(value)
+        now = time.time()
+        # Throttle bar updates — skip if too soon, except for anchors 0.0 and 1.0
+        skip_bar = (
+            value not in (0.0, 1.0)
+            and (now - self._last_progress_time) < 0.05
+        )
         if label:
             self.status_label.configure(text=label)
+        if self._translating and value <= 0:
+            if not self._progress_indeterminate:
+                self.progress_bar.configure(mode="indeterminate")
+                self.progress_bar.start()
+                self._progress_indeterminate = True
+        else:
+            if self._progress_indeterminate:
+                self.progress_bar.stop()
+                self.progress_bar.configure(mode="determinate")
+                self._progress_indeterminate = False
+            if not skip_bar:
+                self.progress_bar.set(value)
+                self._last_progress_time = now
 
     def _start_translation(self):
         if self._translating:
@@ -342,36 +451,45 @@ class App(ctk.CTk):
 
         translator_cls = TRANSLATORS[type_key]
         self._translating = True
-        self.translate_btn.configure(state="disabled", text="Traduzindo...")
+        self.translate_btn.configure(
+            state="disabled", text="Traduzindo...", fg_color=_BTN_BUSY
+        )
+        # Start indeterminate immediately — will switch once real progress arrives
+        self._progress_indeterminate = False
         self._set_progress(0, "Iniciando...")
         self._log(f"\n--- Iniciando traducao ({GAME_TYPE_LABELS[type_key]}) ---")
         self._log(f"Caminho: {path}")
         self._log(f"Idiomas: {self.src_var.get()} -> {self.tgt_var.get()}\n")
 
-        def run():
-            try:
-                translator = translator_cls(
-                    path=path,
-                    src_lang=src_lang,
-                    tgt_lang=tgt_lang,
-                    log_fn=lambda msg: self.after(0, lambda m=msg: self._log(m)),
-                    progress_fn=lambda v, l=None: self.after(
-                        0, lambda vv=v, ll=l: self._set_progress(vv, ll)
-                    ),
-                )
-                output = translator.translate()
-                self.after(0, lambda: self._log(f"\nConcluido! Saida:\n  {output}"))
-            except Exception as exc:
-                _exc = exc
-                self.after(0, lambda e=_exc: self._log(f"\nErro: {e}"))
-            finally:
-                self._translating = False
-                self.after(
-                    0,
-                    lambda: self.translate_btn.configure(state="normal", text="Traduzir Agora"),
-                )
+        self._proc_queue = multiprocessing.Queue()
+        p = multiprocessing.Process(
+            target=worker_process,
+            args=(translator_cls, str(path), src_lang, tgt_lang, self._proc_queue),
+            daemon=True,
+        )
+        p.start()
 
-        threading.Thread(target=run, daemon=True).start()
+
+    def _on_translation_done(self, success: bool):
+        self._translating = False
+        # Stop indeterminate animation if still running
+        if self._progress_indeterminate:
+            self.progress_bar.stop()
+            self.progress_bar.configure(mode="determinate")
+            self._progress_indeterminate = False
+        if success:
+            self.progress_bar.set(1.0)
+            self.translate_btn.configure(
+                state="normal", text="Traduzir Agora", fg_color=_BTN_SUCCESS
+            )
+            self.after(2000, self._restore_btn_color)
+        else:
+            self.translate_btn.configure(
+                state="normal", text="Traduzir Agora", fg_color=_BTN_DEFAULT
+            )
+
+    def _restore_btn_color(self):
+        self.translate_btn.configure(fg_color=_BTN_DEFAULT)
 
 
 def main():
@@ -380,4 +498,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()  # required for PyInstaller on Windows
     main()
