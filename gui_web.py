@@ -16,6 +16,7 @@ from translators.detector import detect_game_type, GAME_TYPE_LABELS
 from translators.twine import TwineTranslator
 from translators.renpy import RenpyTranslator
 from translators.rpgmaker import RPGMakerTranslator
+from translators.unity import UnityTranslator
 
 app = Flask(__name__)
 
@@ -23,6 +24,7 @@ TRANSLATORS = {
     "twine": TwineTranslator,
     "renpy": RenpyTranslator,
     "rpgmaker": RPGMakerTranslator,
+    "unity": UnityTranslator,
 }
 
 # ---------------------------------------------------------------------------

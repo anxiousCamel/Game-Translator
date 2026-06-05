@@ -15,6 +15,7 @@ from translators.engine import _hw_config, _gpu_libs_dir, _GPU_KEY_DLL, download
 from translators.twine import TwineTranslator
 from translators.renpy import RenpyTranslator
 from translators.rpgmaker import RPGMakerTranslator
+from translators.unity import UnityTranslator
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -37,12 +38,14 @@ GAME_TYPES: dict[str, str | None] = {
     "Twine / SugarCube": "twine",
     "RenPy": "renpy",
     "RPGMaker MV/MZ": "rpgmaker",
+    "Unity": "unity",
 }
 
 TRANSLATORS = {
     "twine": TwineTranslator,
     "renpy": RenpyTranslator,
     "rpgmaker": RPGMakerTranslator,
+    "unity": UnityTranslator,
 }
 
 
@@ -74,7 +77,7 @@ class App(ctk.CTk):
         ).pack(side="left")
         ctk.CTkLabel(
             header,
-            text="Twine  |  RenPy  |  RPGMaker MV/MZ",
+            text="Twine  |  RenPy  |  RPGMaker MV/MZ  |  Unity",
             font=ctk.CTkFont(size=12),
             text_color="gray",
         ).pack(side="left", padx=(12, 0), pady=(6, 0))

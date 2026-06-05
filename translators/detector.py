@@ -52,6 +52,12 @@ def detect_game_type(path: Path) -> str | None:
     if (path / "Game.rpgproject").exists() or (path / "game.rpgproject").exists():
         return "rpgmaker"
 
+    # Unity: pasta *_Data com UnityPlayer.dll ao lado
+    if (path / "UnityPlayer.dll").exists():
+        for item in path.iterdir():
+            if item.is_dir() and item.name.endswith("_Data"):
+                return "unity"
+
     return None
 
 
@@ -59,6 +65,7 @@ GAME_TYPE_LABELS = {
     "twine": "Twine / SugarCube",
     "renpy": "RenPy",
     "rpgmaker": "RPGMaker MV/MZ",
+    "unity": "Unity",
 }
 
 
@@ -97,6 +104,8 @@ def sample_game_texts(path: Path, game_type: str, n: int = 200) -> list[str]:
             return _sample_renpy(path, n)
         if game_type == "twine":
             return _sample_twine(path, n)
+        if game_type == "unity":
+            return _sample_unity(path, n)
     except Exception:
         pass
     return []
@@ -147,4 +156,40 @@ def _sample_twine(path: Path, n: int) -> list[str]:
             pass
         if len(texts) >= n:
             break
+    return texts[:n]
+
+
+def _sample_unity(path: Path, n: int) -> list[str]:
+    """Sample readable strings from Unity localization bundles (fast, small files)."""
+    texts: list[str] = []
+    for item in path.iterdir():
+        if item.is_dir() and item.name.endswith("_Data"):
+            aa = item / "StreamingAssets" / "aa"
+            if aa.exists():
+                for bundle in sorted(aa.rglob("*.bundle"))[:6]:
+                    if "catalog" in bundle.name.lower():
+                        continue
+                    try:
+                        import UnityPy as unitypy
+                        env = unitypy.load(str(bundle))
+                        for obj in env.objects:
+                            if obj.type.name == "MonoBehaviour":
+                                try:
+                                    tree = obj.read_typetree()
+                                    _collect_strings(tree, texts, n)
+                                except Exception:
+                                    pass
+                            elif obj.type.name == "TextAsset":
+                                try:
+                                    data = obj.read()
+                                    raw = getattr(data, "text", "") or ""
+                                    for line in raw.splitlines()[:50]:
+                                        if line.strip():
+                                            texts.append(line.strip()[:200])
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    if len(texts) >= n:
+                        return texts[:n]
     return texts[:n]
