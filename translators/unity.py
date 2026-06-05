@@ -135,6 +135,10 @@ def _looks_translatable(s: str) -> bool:
     if not any(c.isalpha() for c in s):
         return False
 
+    # Fast-pass: newline = real dialogue, never an identifier.
+    if "\n" in s or "\r" in s:
+        return True
+
     # Normalize whitespace for visual/identifier checks.
     # Multi-line strings like "Load\nGame" look like "Load Game" to the rules,
     # so they pass space-based tests and don't falsely match code patterns.
@@ -156,9 +160,7 @@ def _looks_translatable(s: str) -> bool:
     if "_" in s:
         return False
 
-    # Path separators and file extensions (check original — slashes are always wrong)
-    if "/" in s or "\\" in s:
-        return False
+    # File extensions (Unity Rich Text tags like </color> contain / — don't block slashes)
     if _EXT_RE.search(check):
         return False
 
@@ -778,7 +780,17 @@ class UnityTranslator(BaseTranslator):
             total = len(to_translate)
             for i in range(0, total, batch_size):
                 batch = to_translate[i : i + batch_size]
-                translated = translate_texts(batch, self.src_lang, self.tgt_lang)
+                # Mask \n so the neural model doesn't destroy line breaks
+                safe_batch = [
+                    s.replace("\r\n", " <BR> ").replace("\n", " <BR> ").replace("\r", " <BR> ")
+                    for s in batch
+                ]
+                translated_safe = translate_texts(safe_batch, self.src_lang, self.tgt_lang)
+                # Restore \n in translated output
+                translated = [
+                    t.replace(" <BR> ", "\n").replace("<BR>", "\n")
+                    for t in translated_safe
+                ]
                 cache.update(zip(batch, translated))
                 cache_file.write_text(
                     json.dumps(cache, ensure_ascii=False, indent=2),
