@@ -135,56 +135,147 @@ def _looks_translatable(s: str) -> bool:
     if not any(c.isalpha() for c in s):
         return False
 
-    # --- Hard identifier patterns ---
-    if _GUID_RE.match(s):
+    # Normalize whitespace for visual/identifier checks.
+    # Multi-line strings like "Load\nGame" look like "Load Game" to the rules,
+    # so they pass space-based tests and don't falsely match code patterns.
+    # The caller always stores the ORIGINAL string — this variable is check-only.
+    check = s.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+
+    # --- Hard identifier patterns (run on `check` = newlines→spaces) ---
+    if _GUID_RE.match(check):
         return False
-    if _CAMEL_RE.match(s) or _SCREAMING_RE.match(s):
+    if _CAMEL_RE.match(check) or _SCREAMING_RE.match(check):
         return False
-    if _HEX_COLOR_RE.match(s) or _NUMBER_RE.match(s):
+    if _HEX_COLOR_RE.match(check) or _NUMBER_RE.match(check):
         return False
-    if _CHARRANGE_RE.match(s):
+    if _CHARRANGE_RE.match(check):
         return False
 
-    # Underscore-separated identifiers: "L_arm", "A_attack", "angler_01_Atlas"
-    if "_" in s and " " not in s:
+    # Underscore identifiers: block if original string (before normalization) has underscore.
+    # Real human dialogue never has underscores; "L_arm\nR_arm" must still be blocked.
+    if "_" in s:
         return False
 
-    # Path separators and file extensions
+    # Path separators and file extensions (check original — slashes are always wrong)
     if "/" in s or "\\" in s:
         return False
-    if _EXT_RE.search(s):
+    if _EXT_RE.search(check):
         return False
 
-    # Starts with known non-translatable prefixes
-    if s.startswith(("http", "Assets/", "assets/", "Packages/", "@")):
+    # Known non-translatable prefixes
+    if check.startswith(("http", "Assets/", "assets/", "Packages/", "@")):
         return False
 
-    # Method call signature: no spaces + parens = code, not dialogue
-    # Blocks: "OnClick()", "SomeMethod(arg)" — NOT "(Cassie says...)" (has spaces)
-    if "(" in s and ")" in s and " " not in s:
+    # Method call: no whitespace + parens = code identifier
+    if "(" in check and ")" in check and " " not in check:
         return False
 
-    # Assembly-qualified type name: "GameManager, Assembly-CSharp"
-    if ", Assembly-" in s or s.endswith(", Assembly-CSharp"):
+    # Assembly-qualified type name
+    if ", Assembly-" in check or check.endswith(", Assembly-CSharp"):
         return False
 
     # Unity reserved lifecycle / event names
-    if s in _UNITY_RESERVED:
+    if check in _UNITY_RESERVED:
         return False
 
-    # PascalCase compound identifiers without spaces: "OnNewGame", "LoadScene", "MainMenu"
-    # Rule: no spaces AND starts uppercase AND has a second uppercase letter somewhere
-    # This catches identifiers but not single words like "Attack", "Follow", "Load"
-    if " " not in s and _PASCAL_ID_RE.match(s):
+    # PascalCase compound without whitespace: "OnNewGame", "LoadScene", "MainMenu"
+    if " " not in check and _PASCAL_ID_RE.match(check):
         return False
 
     return True
 
 
+_BLANK_LINE_RE = re.compile(r"(?:\r?\n){2,}")  # two+ newlines = paragraph boundary
+
+
+def _normalize_nl(s: str) -> str:
+    """Normalize line endings to \\n. Used as cache key so \\r\\n == \\n never mismatches."""
+    return s.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _apply_text_blocks(raw: str, cache: dict) -> tuple[str, bool]:
+    """
+    Apply cache translations to a plain-text string.
+
+    Strategy (mirrors _collect_text_blocks priority):
+    1. Try to replace each paragraph block (multi-line) as a whole.
+    2. For paragraphs not found in cache, fall back to line-by-line replacement.
+
+    Returns (new_text, changed).
+    """
+    raw_n = _normalize_nl(raw)
+    parts = _BLANK_LINE_RE.split(raw_n)
+    # Separators between parts (the blank-line sequences themselves)
+    seps = _BLANK_LINE_RE.findall(raw_n)
+
+    result = []
+    changed = False
+    for idx, block in enumerate(parts):
+        key = block.strip()
+        tr = cache.get(key) if key else None
+
+        if tr and tr != key:
+            # Whole block translated — preserve leading/trailing whitespace of original block
+            leading  = block[: len(block) - len(block.lstrip())]
+            trailing = block[len(block.rstrip()):]
+            result.append(leading + tr + trailing)
+            changed = True
+        else:
+            # Fall back to line-by-line within this block
+            new_lines = []
+            block_changed = False
+            for line in block.splitlines(keepends=True):
+                stripped = _normalize_nl(line.strip())
+                line_tr = cache.get(stripped) if stripped else None
+                if line_tr and line_tr != stripped:
+                    new_lines.append(line.replace(line.strip(), line_tr, 1))
+                    block_changed = True
+                else:
+                    new_lines.append(line)
+            if block_changed:
+                result.append("".join(new_lines))
+                changed = True
+            else:
+                result.append(block)
+
+        # Re-insert separator
+        if idx < len(seps):
+            result.append(seps[idx])
+
+    return "".join(result), changed
+
+
+def _collect_text_blocks(raw: str, out: set) -> None:
+    """
+    Collect translatable text from a plain-text string (TextAsset or file).
+
+    Strategy:
+    1. Try to collect multi-line dialogue blocks (paragraphs separated by blank lines).
+       A paragraph preserves its internal \\n so the full block is one cache key.
+    2. Also collect individual non-empty lines as fallback for single-line entries.
+
+    All strings are \\r\\n-normalized before storage.
+    """
+    raw_n = _normalize_nl(raw)
+
+    # Pass 1 — paragraph blocks (blank-line boundaries)
+    for block in _BLANK_LINE_RE.split(raw_n):
+        block = block.strip()
+        if _looks_translatable(block):
+            out.add(block)
+
+    # Pass 2 — individual lines (handles single-line entries not part of paragraphs)
+    for line in raw_n.splitlines():
+        line = line.strip()
+        if _looks_translatable(line):
+            out.add(line)
+
+
 def _collect(obj: Any, out: set) -> None:
     if isinstance(obj, str):
-        if _looks_translatable(obj):
-            out.add(obj)
+        s = _normalize_nl(obj)
+        if _looks_translatable(s):
+            out.add(s)
     elif isinstance(obj, dict):
         for k, v in obj.items():
             if k not in _SKIP_MB_FIELDS:
@@ -196,7 +287,8 @@ def _collect(obj: Any, out: set) -> None:
 
 def _patch(obj: Any, cache: dict) -> Any:
     if isinstance(obj, str):
-        return cache.get(obj, obj)
+        # Normalize the lookup key so \r\n originals hit \n-normalized cache entries
+        return cache.get(_normalize_nl(obj), obj)
     if isinstance(obj, dict):
         return {k: (v if k in _SKIP_MB_FIELDS else _patch(v, cache)) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -221,7 +313,7 @@ def _is_string_table(tree: dict) -> bool:
 def _collect_string_table(tree: dict, out: set) -> None:
     """Collect only m_Localized values from StringTable entries."""
     for entry in tree.get("m_TableData", []):
-        val = entry.get("m_Localized", "")
+        val = _normalize_nl(entry.get("m_Localized", ""))
         if _looks_translatable(val):
             out.add(val)
 
@@ -235,7 +327,7 @@ def _patch_string_table(tree: dict, cache: dict) -> dict:
     new_entries = []
     changed = False
     for entry in tree.get("m_TableData", []):
-        orig = entry.get("m_Localized", "")
+        orig = _normalize_nl(entry.get("m_Localized", ""))
         translated = cache.get(orig)
         if translated and translated != orig:
             new_entry = dict(entry)
@@ -435,10 +527,7 @@ class UnityTranslator(BaseTranslator):
                             continue
                         except json.JSONDecodeError:
                             pass
-                    for line in raw.splitlines():
-                        line = line.strip()
-                        if _looks_translatable(line):
-                            out.add(line)
+                    _collect_text_blocks(raw, out)
 
                 elif obj.type.name == "MonoBehaviour":
                     try:
@@ -468,10 +557,7 @@ class UnityTranslator(BaseTranslator):
                 return len(out) - before
             except json.JSONDecodeError:
                 pass
-        for line in raw.splitlines():
-            line = line.strip()
-            if _looks_translatable(line):
-                out.add(line)
+        _collect_text_blocks(raw, out)
         return len(out) - before
 
     # ── Injection ──────────────────────────────────────────────────────────
@@ -507,18 +593,9 @@ class UnityTranslator(BaseTranslator):
                             continue
                         except json.JSONDecodeError:
                             pass
-                    new_lines = []
-                    changed = False
-                    for line in raw.splitlines(keepends=True):
-                        stripped = line.strip()
-                        tr = cache.get(stripped)
-                        if tr and tr != stripped:
-                            new_lines.append(line.replace(stripped, tr, 1))
-                            changed = True
-                        else:
-                            new_lines.append(line)
-                    if changed:
-                        data.text = "".join(new_lines)
+                    new_text, ta_changed = _apply_text_blocks(raw, cache)
+                    if ta_changed:
+                        data.text = new_text
                         data.save()
                         modified = True
 
@@ -567,18 +644,9 @@ class UnityTranslator(BaseTranslator):
                 return False
             except json.JSONDecodeError:
                 pass
-        new_lines = []
-        changed = False
-        for line in raw.splitlines(keepends=True):
-            stripped = line.strip()
-            tr = cache.get(stripped)
-            if tr and tr != stripped:
-                new_lines.append(line.replace(stripped, tr, 1))
-                changed = True
-            else:
-                new_lines.append(line)
+        new_text, changed = _apply_text_blocks(raw, cache)
         if changed:
-            dst.write_text("".join(new_lines), encoding="utf-8")
+            dst.write_text(new_text, encoding="utf-8")
             return True
         return False
 
