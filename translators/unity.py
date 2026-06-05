@@ -13,21 +13,49 @@ from .engine import ensure_model, translate_texts
 # ---------------------------------------------------------------------------
 
 _SKIP_MB_FIELDS = frozenset({
+    # Unity internals — identity / references
     "m_Name", "name", "m_Script", "m_GameObject",
     "guid", "fileID", "type", "m_PathID", "m_FileID",
-    "m_ObjectHideFlags", "m_Tag", "m_Layer", "m_ClassName",
-    "m_Namespace", "m_AssemblyName", "m_Font", "m_FontName",
-    "m_AtlasName", "m_SpriteName", "m_ShaderName",
-    "m_SceneName", "m_SceneGUID",
+    "m_ObjectHideFlags", "m_Tag", "m_Layer",
+    "m_ClassName", "m_Namespace", "m_AssemblyName",
+    # Asset names / paths
+    "m_Font", "m_FontName", "m_AtlasName", "m_SpriteName",
+    "m_ShaderName", "m_SceneName", "m_SceneGUID",
+    "m_Path", "m_AssetPath", "m_ResourcePath",
+    # UnityEvent / button onClick — CRITICAL: method names break buttons if translated
+    "m_MethodName", "m_TargetAssemblyTypeName",
+    "m_StringArgument", "m_ObjectArgumentAssemblyTypeName",
+    # Unity.Localization — table identifiers, locale codes
+    "m_TableCollectionName", "m_TableCollectionNameGuid",
+    "m_LocaleId", "m_Code", "m_Identifier", "m_CustomLocaleName",
+    # Animation / state machine identifiers
+    "m_StateMachineName", "m_DefaultState",
 })
 
-_GUID_RE      = re.compile(r'^[0-9a-f]{8,}$', re.ASCII)
-_CAMEL_RE     = re.compile(r'^[a-z][a-zA-Z0-9]{2,}$')
-_SCREAMING_RE = re.compile(r'^[A-Z][A-Z0-9_]{2,}$')
-_HEX_COLOR_RE = re.compile(r'^#[0-9a-fA-F]{3,8}$')
-_NUMBER_RE    = re.compile(r'^\d[\d.,\s%]*[a-zA-Z]?$')
+_GUID_RE       = re.compile(r'^[0-9a-f]{8,}$', re.ASCII)
+_CAMEL_RE      = re.compile(r'^[a-z][a-zA-Z0-9]{2,}$')
+_SCREAMING_RE  = re.compile(r'^[A-Z][A-Z0-9_]{2,}$')
+_HEX_COLOR_RE  = re.compile(r'^#[0-9a-fA-F]{3,8}$')
+_NUMBER_RE     = re.compile(r'^\d[\d.,\s%]*[a-zA-Z]?$')
 # Unicode char-range strings like "20-7E,A1-AC,..." (font character maps)
-_CHARRANGE_RE = re.compile(r'^[0-9A-Fa-f]{2,4}(-[0-9A-Fa-f]{2,4})?(,[0-9A-Fa-f])')
+_CHARRANGE_RE  = re.compile(r'^[0-9A-Fa-f]{2,4}(-[0-9A-Fa-f]{2,4})?(,[0-9A-Fa-f])')
+# PascalCase compound identifier without spaces: "NewGame", "OnLoadGame", "MainMenuButton"
+# Matches: uppercase letter, 1+ lowercase, then at least one more uppercase → compound
+_PASCAL_ID_RE  = re.compile(r'^[A-Z][a-z]+(?:[A-Z][a-zA-Z0-9]*)+$')
+# Common asset file extensions inside strings
+_EXT_RE        = re.compile(r'\.(png|jpg|wav|mp3|ogg|prefab|unity|asset|mat|anim|controller|fbx|obj|ttf|otf|shader)(\b|$)', re.IGNORECASE)
+
+# Unity lifecycle / event handler names — never translatable
+_UNITY_RESERVED = frozenset({
+    "Awake", "Start", "Update", "FixedUpdate", "LateUpdate",
+    "OnEnable", "OnDisable", "OnDestroy", "OnApplicationQuit",
+    "OnTriggerEnter", "OnTriggerExit", "OnTriggerStay",
+    "OnCollisionEnter", "OnCollisionExit", "OnCollisionStay",
+    "OnClick", "OnValueChanged", "OnSubmit", "OnEndEdit",
+    "GameObject", "Transform", "Component", "MonoBehaviour",
+    "ScriptableObject", "UnityEvent", "UnityEngine",
+    "Assembly-CSharp", "Assembly-CSharp-firstpass",
+})
 
 # Addressables catalog JSON — do not translate
 _CATALOG_KEYS = frozenset({"m_LocatorId", "m_InstanceProviderData", "m_ProviderIds"})
@@ -106,6 +134,8 @@ def _looks_translatable(s: str) -> bool:
         return False
     if not any(c.isalpha() for c in s):
         return False
+
+    # --- Hard identifier patterns ---
     if _GUID_RE.match(s):
         return False
     if _CAMEL_RE.match(s) or _SCREAMING_RE.match(s):
@@ -114,14 +144,40 @@ def _looks_translatable(s: str) -> bool:
         return False
     if _CHARRANGE_RE.match(s):
         return False
-    # Underscore-separated identifiers (bone names, animation states, asset refs)
-    # "L_arm", "A_attack", "angler_01_Atlas" — but not "Give birth" (has space)
+
+    # Underscore-separated identifiers: "L_arm", "A_attack", "angler_01_Atlas"
     if "_" in s and " " not in s:
         return False
+
+    # Path separators and file extensions
     if "/" in s or "\\" in s:
         return False
-    if s.startswith(("http", "Assets/", "assets/", "Packages/")):
+    if _EXT_RE.search(s):
         return False
+
+    # Starts with known non-translatable prefixes
+    if s.startswith(("http", "Assets/", "assets/", "Packages/", "@")):
+        return False
+
+    # Method call signature: no spaces + parens = code, not dialogue
+    # Blocks: "OnClick()", "SomeMethod(arg)" — NOT "(Cassie says...)" (has spaces)
+    if "(" in s and ")" in s and " " not in s:
+        return False
+
+    # Assembly-qualified type name: "GameManager, Assembly-CSharp"
+    if ", Assembly-" in s or s.endswith(", Assembly-CSharp"):
+        return False
+
+    # Unity reserved lifecycle / event names
+    if s in _UNITY_RESERVED:
+        return False
+
+    # PascalCase compound identifiers without spaces: "OnNewGame", "LoadScene", "MainMenu"
+    # Rule: no spaces AND starts uppercase AND has a second uppercase letter somewhere
+    # This catches identifiers but not single words like "Attack", "Follow", "Load"
+    if " " not in s and _PASCAL_ID_RE.match(s):
+        return False
+
     return True
 
 
@@ -146,6 +202,53 @@ def _patch(obj: Any, cache: dict) -> Any:
     if isinstance(obj, list):
         return [_patch(item, cache) for item in obj]
     return obj
+
+
+# ---------------------------------------------------------------------------
+# Unity.Localization StringTable native support
+# ---------------------------------------------------------------------------
+
+def _is_string_table(tree: dict) -> bool:
+    """True if MonoBehaviour is a Unity.Localization StringTable."""
+    return (
+        isinstance(tree.get("m_TableData"), list)
+        and len(tree["m_TableData"]) > 0
+        and isinstance(tree["m_TableData"][0], dict)
+        and "m_Localized" in tree["m_TableData"][0]
+    )
+
+
+def _collect_string_table(tree: dict, out: set) -> None:
+    """Collect only m_Localized values from StringTable entries."""
+    for entry in tree.get("m_TableData", []):
+        val = entry.get("m_Localized", "")
+        if _looks_translatable(val):
+            out.add(val)
+
+
+def _patch_string_table(tree: dict, cache: dict) -> dict:
+    """
+    Patch StringTable safely: only replace m_Localized.
+    Keys (m_Id), metadata, and table name are never touched.
+    Returns a new tree dict (does not mutate original).
+    """
+    new_entries = []
+    changed = False
+    for entry in tree.get("m_TableData", []):
+        orig = entry.get("m_Localized", "")
+        translated = cache.get(orig)
+        if translated and translated != orig:
+            new_entry = dict(entry)
+            new_entry["m_Localized"] = translated
+            new_entries.append(new_entry)
+            changed = True
+        else:
+            new_entries.append(entry)
+    if not changed:
+        return tree
+    new_tree = dict(tree)
+    new_tree["m_TableData"] = new_entries
+    return new_tree
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +443,10 @@ class UnityTranslator(BaseTranslator):
                 elif obj.type.name == "MonoBehaviour":
                     try:
                         tree = obj.read_typetree()
-                        _collect(tree, out)
+                        if _is_string_table(tree):
+                            _collect_string_table(tree, out)
+                        else:
+                            _collect(tree, out)
                     except Exception:
                         pass
             except Exception:
@@ -419,8 +525,11 @@ class UnityTranslator(BaseTranslator):
                 elif obj.type.name == "MonoBehaviour":
                     try:
                         tree = obj.read_typetree()
-                        new_tree = _patch(tree, cache)
-                        if new_tree != tree:
+                        if _is_string_table(tree):
+                            new_tree = _patch_string_table(tree, cache)
+                        else:
+                            new_tree = _patch(tree, cache)
+                        if new_tree is not tree:
                             obj.save_typetree(new_tree)
                             modified = True
                     except Exception:
