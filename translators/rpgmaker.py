@@ -38,7 +38,7 @@ _TXT_SEP_RE = re.compile(r"^/{5,}")
 class RPGMakerTranslator(BaseTranslator):
     def translate(self) -> Path:
         data_dir = self._find_data_dir()
-        ensure_model(self.src_lang, self.tgt_lang, self.log)
+        ensure_model(self.src_lang, self.tgt_lang, self.log, engine=self.engine)
 
         # --- Backup base data (always translate from original) ---
         backup_dir = data_dir.parent / f"{data_dir.name}-original"
@@ -93,7 +93,7 @@ class RPGMakerTranslator(BaseTranslator):
         batch_size = 20
         for i in range(0, total, batch_size):
             batch = to_do[i : i + batch_size]
-            translated = translate_texts(batch, self.src_lang, self.tgt_lang)
+            translated = translate_texts(batch, self.src_lang, self.tgt_lang, engine=self.engine)
             for orig, trad in zip(batch, translated):
                 cache[orig] = trad
             _save_cache(cache_path, cache)

@@ -4,6 +4,7 @@ import re
 import stat
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -294,7 +295,9 @@ def _install_pkg(src: str, tgt: str, available: list, log_fn: Callable) -> None:
     log_fn(f"  {src}->{tgt} instalado.")
 
 
-def ensure_model(src: str, tgt: str, log_fn: Callable = print) -> None:
+def ensure_model(src: str, tgt: str, log_fn: Callable = print, engine: str = "local") -> None:
+    if engine != "local":
+        return  # online engines don't need local model installation
     key = (src, tgt)
     if key in _installed:
         return
@@ -520,9 +523,84 @@ def _translate_single_pass(texts: list[str], src: str, tgt: str) -> list[str]:
     return translated
 
 
-def translate_texts(texts: list[str], src: str, tgt: str, workers: int = 0) -> list[str]:
+# ---------------------------------------------------------------------------
+# Google Translate backend (deep-translator, no API key needed)
+# ---------------------------------------------------------------------------
+
+# Google uses different codes for some languages
+_GOOGLE_LANG = {"zh": "zh-CN"}
+
+
+def _translate_google(texts: list[str], src: str, tgt: str) -> list[str]:
+    from deep_translator import GoogleTranslator
+
+    gsrc = _GOOGLE_LANG.get(src, src)
+    gtgt = _GOOGLE_LANG.get(tgt, tgt)
+
+    result: list[str] = []
+    chunk_size = 50
+    for i in range(0, len(texts), chunk_size):
+        chunk = texts[i : i + chunk_size]
+        non_empty = [(j, t) for j, t in enumerate(chunk) if t.strip()]
+        if not non_empty:
+            result.extend(chunk)
+            continue
+        idxs, to_tr = zip(*non_empty)
+        try:
+            translated = GoogleTranslator(source=gsrc, target=gtgt).translate_batch(list(to_tr))
+            row = list(chunk)
+            for j, tr in zip(idxs, translated):
+                row[j] = tr or chunk[j]
+            result.extend(row)
+        except Exception:
+            result.extend(chunk)  # fallback: keep original on error
+        time.sleep(1.5)  # anti-ban: avoid HTTP 429 on large games
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Public translation entry point
+# ---------------------------------------------------------------------------
+
+def refazer_com_ia_litellm(
+    texto_original: str,
+    src_lang: str = "en",
+    tgt_lang: str = "pt",
+    model_name: str = "",
+    api_key: str = "",
+    base_url: str = "",
+) -> str:
+    """Translate a single text via LiteLLM (any provider: OpenAI, Gemini, Ollama, etc.)."""
+    import litellm
+
+    system_prompt = (
+        f"You are a professional game localization translator. "
+        f"Translate the following text from {src_lang} to {tgt_lang}. "
+        "Preserve placeholder tokens like [T0], [T1], [T2] exactly as written. "
+        "Return ONLY the translated text — no explanations, no quotes."
+    )
+    kwargs: dict = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": texto_original},
+        ],
+    }
+    if api_key:
+        kwargs["api_key"] = api_key
+    if base_url:
+        kwargs["base_url"] = base_url
+
+    response = litellm.completion(**kwargs)
+    return response.choices[0].message.content.strip()
+
+
+def translate_texts(texts: list[str], src: str, tgt: str, workers: int = 0, engine: str = "local") -> list[str]:
     if not texts:
         return []
+    if engine == "google":
+        return _translate_google(texts, src, tgt)
     path = _translation_paths.get((src, tgt), [src, tgt])
     if len(path) == 3:
         pivot = path[1]

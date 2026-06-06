@@ -12,12 +12,14 @@ class BaseTranslator(ABC):
         tgt_lang: str,
         log_fn: Callable = print,
         progress_fn: Optional[Callable] = None,
+        engine: str = "local",
     ):
         self.path = path
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
         self.log = log_fn
         self._progress_fn = progress_fn
+        self.engine = engine
 
     def set_progress(self, value: float, label: str = None):
         if self._progress_fn:

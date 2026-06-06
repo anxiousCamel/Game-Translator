@@ -51,7 +51,7 @@ _SKIP_VALUE_RE = re.compile(
 class RenpyTranslator(BaseTranslator):
     def translate(self) -> Path:
         source_dir, dest_dir = self._find_dirs()
-        ensure_model(self.src_lang, self.tgt_lang, self.log)
+        ensure_model(self.src_lang, self.tgt_lang, self.log, engine=self.engine)
 
         source_files = sorted(source_dir.rglob("*.rpy"))
         self.log(f"{len(source_files)} arquivos .rpy encontrados.")
@@ -67,7 +67,7 @@ class RenpyTranslator(BaseTranslator):
         batch_size = 80
         for i in range(0, total, batch_size):
             batch = to_do[i : i + batch_size]
-            translated = translate_texts(batch, self.src_lang, self.tgt_lang)
+            translated = translate_texts(batch, self.src_lang, self.tgt_lang, engine=self.engine)
             for orig, trad in zip(batch, translated):
                 cache[orig] = trad
             _save_cache(cache_path, cache)

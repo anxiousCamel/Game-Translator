@@ -4,9 +4,10 @@ argostranslate
 sentencepiece
 sacremoses
 psutil
-flask
 unrpa
 customtkinter
+deep-translator
+litellm
 langid
 unitypy
 TypeTreeGeneratorAPI

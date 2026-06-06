@@ -45,6 +45,8 @@ _CHARRANGE_RE  = re.compile(r'^[0-9A-Fa-f]{2,4}(-[0-9A-Fa-f]{2,4})?(,[0-9A-Fa-f]
 _PASCAL_ID_RE  = re.compile(r'^[A-Z][a-z]+(?:[A-Z][a-zA-Z0-9]*)+$')
 # Common asset file extensions inside strings
 _EXT_RE        = re.compile(r'\.(png|jpg|wav|mp3|ogg|prefab|unity|asset|mat|anim|controller|fbx|obj|ttf|otf|shader)(\b|$)', re.IGNORECASE)
+# Unity / TextMeshPro Rich Text tags: <b>, <size=10>, <color=#FF0000>, </color>, etc.
+_TAG_RE        = re.compile(r'<[^>]+>')
 
 # Unity lifecycle / event handler names — never translatable
 _UNITY_RESERVED = frozenset({
@@ -60,6 +62,20 @@ _UNITY_RESERVED = frozenset({
 
 # Addressables catalog JSON — do not translate
 _CATALOG_KEYS = frozenset({"m_LocatorId", "m_InstanceProviderData", "m_ProviderIds"})
+
+# Known AI hallucination outputs — discard these translations and keep the original
+_HALLUCINATIONS: frozenset[str] = frozenset({
+    "não, não, não.",
+    "não sei.",
+    "o que é isso?",
+    "o que é isso",
+    "não sei",
+    "no, no, no.",
+    "i don't know.",
+    "what is this?",
+    "what is this",
+    "i don't know",
+})
 
 # File names that must never be modified (Unity engine config, not game text)
 _SKIP_FILENAMES = frozenset({
@@ -127,11 +143,34 @@ _UNITY_EXTS = frozenset({".assets", ".unity3d", ".bundle"})
 _TEXT_EXTS  = frozenset({".json", ".csv", ".txt"})
 
 
+def _mask_tags(s: str) -> tuple[str, list[str]]:
+    """Replace <...> tags with [T0], [T1],... tokens. Returns (masked_str, original_tags)."""
+    tags: list[str] = []
+
+    def _replacer(m: re.Match) -> str:
+        tags.append(m.group(0))
+        return f"[T{len(tags) - 1}]"
+
+    return _TAG_RE.sub(_replacer, s), tags
+
+
+def _unmask_tags(s: str, tags: list[str]) -> str:
+    """Restore [T0], [T1],... tokens back to their original tags."""
+    for idx, tag in enumerate(tags):
+        s = s.replace(f"[T{idx}]", tag)
+    return s
+
+
 def _looks_translatable(s: str) -> bool:
     if not isinstance(s, str):
         return False
     s = s.strip()
     if len(s) < 3:
+        return False
+    # Strip Rich Text tags and require at least 2 visible alphabetic characters.
+    # Prevents "E", "<size=10>F</size>" etc. from being sent for translation.
+    visible = _TAG_RE.sub("", s).strip()
+    if sum(1 for c in visible if c.isalpha()) < 2:
         return False
     if not any(c.isalpha() for c in s):
         return False
@@ -711,7 +750,7 @@ class UnityTranslator(BaseTranslator):
                 "Selecione a pasta raiz do jogo (mesma pasta do .exe)."
             )
 
-        ensure_model(self.src_lang, self.tgt_lang, self.log)
+        ensure_model(self.src_lang, self.tgt_lang, self.log, engine=self.engine)
 
         backup_root = self.path / "_unity_backup"
         cache_file  = self.path / "traducoes_unity.json"
@@ -785,17 +824,41 @@ class UnityTranslator(BaseTranslator):
             total = len(to_translate)
             for i in range(0, total, batch_size):
                 batch = to_translate[i : i + batch_size]
-                # Mask \n so the neural model doesn't destroy line breaks
+
+                # Step 1 — mask Rich Text tags so the model never sees <size=10> etc.
+                masked_strs: list[str] = []
+                tag_maps:    list[list[str]] = []
+                for s in batch:
+                    masked, tags = _mask_tags(s)
+                    masked_strs.append(masked)
+                    tag_maps.append(tags)
+
+                # Step 2 — mask \n so the neural model doesn't destroy line breaks
                 safe_batch = [
                     s.replace("\r\n", " <BR> ").replace("\n", " <BR> ").replace("\r", " <BR> ")
-                    for s in batch
+                    for s in masked_strs
                 ]
-                translated_safe = translate_texts(safe_batch, self.src_lang, self.tgt_lang)
-                # Restore \n in translated output
-                translated = [
+
+                translated_safe = translate_texts(safe_batch, self.src_lang, self.tgt_lang, engine=self.engine)
+
+                # Step 3 — restore \n
+                translated_unmasked = [
                     t.replace(" <BR> ", "\n").replace("<BR>", "\n")
                     for t in translated_safe
                 ]
+
+                # Step 4 — restore Rich Text tags
+                translated_tagged = [
+                    _unmask_tags(t, tags)
+                    for t, tags in zip(translated_unmasked, tag_maps)
+                ]
+
+                # Step 5 — anti-hallucination: discard known bad outputs
+                translated = [
+                    orig if t.strip().lower() in _HALLUCINATIONS else t
+                    for orig, t in zip(batch, translated_tagged)
+                ]
+
                 cache.update(zip(batch, translated))
                 time.sleep(0.01)  # yield GIL to Tkinter thread between batches
                 cache_file.write_text(

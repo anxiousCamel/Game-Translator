@@ -1,0 +1,7 @@
+{
+  "theme": "dark",
+  "ai_model": "openai/meta/llama-3.1-70b-instruct",
+  "ai_api_key": "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",
+  "ai_base_url": "https://integrate.api.nvidia.com/v1",
+  "lang": "pt"
+}

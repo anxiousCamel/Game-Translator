@@ -21,7 +21,7 @@ _CODE_TAGS = {"script", "stylesheet", "widget", "init", "annotation", "nobr"}
 class TwineTranslator(BaseTranslator):
     def translate(self) -> Path:
         html_path = self._resolve_html()
-        ensure_model(self.src_lang, self.tgt_lang, self.log)
+        ensure_model(self.src_lang, self.tgt_lang, self.log, engine=self.engine)
 
         self.log(f"Lendo: {html_path.name}")
         original = html_path.read_text(encoding="utf-8", errors="replace")
@@ -39,7 +39,7 @@ class TwineTranslator(BaseTranslator):
         batch_size = 20
         for i in range(0, total, batch_size):
             batch = to_do[i : i + batch_size]
-            translated = translate_texts(batch, self.src_lang, self.tgt_lang)
+            translated = translate_texts(batch, self.src_lang, self.tgt_lang, engine=self.engine)
             for orig, trad in zip(batch, translated):
                 cache[orig] = trad
             _save_cache(cache_path, cache)
