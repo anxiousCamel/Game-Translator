@@ -11,7 +11,6 @@ from .base import BaseTranslator
 from .engine import (
     ensure_model, translate_texts,
     load_glossary, mask_glossary, unmask_glossary,
-    mask_code_vars, unmask_code_vars,
 )
 
 # ---------------------------------------------------------------------------
@@ -27,10 +26,10 @@ from .engine import (
 #
 # path_len includes null terminator + zero-padding to 4-byte boundary.
 
-_PCK_MAGIC      = 0x43504447   # "GDPC" little-endian
-_PACK_REL_FILEBASE = 1          # pack_flags bit: offsets relative to file_base
-_V1_RESERVED    = 16
-_V2_RESERVED    = 64
+_PCK_MAGIC         = 0x43504447   # "GDPC" little-endian
+_PACK_REL_FILEBASE = 1             # pack_flags bit: offsets relative to file_base
+_V1_RESERVED       = 16
+_V2_RESERVED       = 64
 
 
 def _parse_pck(data: bytes) -> dict:
@@ -128,10 +127,49 @@ def _write_pck(info: dict) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# String extraction — text-format files (.gd, .tscn, .tres, .csv, .json)
+# Variable shield — single unified [T#] pass (no collision with [G#] glossary)
+#
+# Covers:
+#   BBCode tags: [b], [/b], [color=red], [url=...], etc.
+#   C printf:    %s, %d, %f, %.2f, %1$s, etc.
+#   Named slots: {name}, {0}  (Godot 4 String.format)
+#   Rich text:   <b>, <color=#fff>  (some Godot UI / TextMeshPro)
+#   RPG vars:    %PLAYER_NAME%
 # ---------------------------------------------------------------------------
 
-_QUOTED_RE = re.compile(r'"((?:[^"\\]|\\.){2,})"')
+_GODOT_SHIELD_RE = re.compile(
+    r'\[/?(?:b|i|u|s|center|right|left|fill|indent|code|kbd|wave|tornado|shake|pulse|'
+    r'rainbow|color|font|font_size|font_color|outline_size|outline_color|shadow_offset|'
+    r'shadow_color|shadow_size|bgcolor|fgcolor|url|hint|img|table|cell|ol|ul|li|lb|rb|'
+    r'lrm|rlm|p)(?:=[^\]]*)?\]'
+    r'|(?<![A-Za-z0-9])%(?:\d+\$)?[-+0#]*\*?\d*(?:\.\*?\d*)?[sdifouxXeEgGcpn](?![A-Za-z0-9_])'
+    r'|\{[A-Za-z0-9_]+\}'
+    r'|<[^>]{1,60}>'
+    r'|%[A-Z][A-Z0-9_]{1,20}%',
+    re.IGNORECASE,
+)
+
+
+def _shield_vars(s: str) -> tuple[str, list[str]]:
+    tokens: list[str] = []
+
+    def _repl(m: re.Match) -> str:
+        tokens.append(m.group(0))
+        return f'[T{len(tokens) - 1}]'
+
+    return _GODOT_SHIELD_RE.sub(_repl, s), tokens
+
+
+def _unshield_vars(s: str, tokens: list[str]) -> str:
+    for i, tok in enumerate(tokens):
+        s = s.replace(f'[T{i}]', tok)
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Common translatable guard
+# ---------------------------------------------------------------------------
+
 _SKIP_GODOT = re.compile(
     r'^(?:res|user)://'
     r'|^[A-Z_][A-Z0-9_]{2,}$'
@@ -155,147 +193,285 @@ def _translatable(s: str) -> bool:
     return True
 
 
-def _extract_text_file(data: bytes, out: set) -> None:
+# ---------------------------------------------------------------------------
+# .gd scripts — only tr() / atr() calls
+# ---------------------------------------------------------------------------
+
+_GD_TR_RE = re.compile(r'(\ba?tr\s*\(\s*)"((?:[^"\\]|\\.)*)"(\s*\))')
+
+
+def _extract_gd(data: bytes, out: set) -> None:
     try:
         text = data.decode('utf-8', errors='replace')
     except Exception:
         return
-    # CSV: each cell can be a translatable string
-    if text.lstrip().startswith('"') or ',' in text[:80]:
-        for line in text.splitlines():
-            for cell in line.split(','):
-                s = cell.strip().strip('"')
-                if _translatable(s):
-                    out.add(s)
-    # All quoted strings
-    for m in _QUOTED_RE.finditer(text):
-        s = m.group(1).replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
+    for m in _GD_TR_RE.finditer(text):
+        s = m.group(2).replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
         if _translatable(s):
             out.add(s)
 
 
-def _apply_text_file(data: bytes, cache: dict) -> bytes:
+def _apply_gd(data: bytes, cache: dict) -> bytes:
     try:
         text = data.decode('utf-8', errors='replace')
     except Exception:
         return data
 
     def _repl(m: re.Match) -> str:
-        raw = m.group(1).replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
-        tr  = cache.get(raw)
+        prefix, content, suffix = m.group(1), m.group(2), m.group(3)
+        raw = content.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
+        tr = cache.get(raw)
         if tr and tr != raw:
-            esc = tr.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t')
-            return f'"{esc}"'
+            esc = (tr.replace('\\', '\\\\').replace('"', '\\"')
+                     .replace('\n', '\\n').replace('\t', '\\t'))
+            return f'{prefix}"{esc}"{suffix}'
         return m.group(0)
 
-    new_text = _QUOTED_RE.sub(_repl, text)
+    new_text = _GD_TR_RE.sub(_repl, text)
     return new_text.encode('utf-8') if new_text != text else data
 
 
 # ---------------------------------------------------------------------------
-# String extraction — Godot binary resources (.scn, .res, .translation)
+# .tscn / .tres — only values of known text-bearing properties
 # ---------------------------------------------------------------------------
 
-_RSRC_MAGIC = b'RSRC'
-_RSCC_MAGIC = b'RSCC'
+_TSCN_TEXT_PROPS = frozenset({
+    'bb_code_text', 'button_text', 'caption', 'description', 'dialog_text',
+    'footer', 'header', 'hint_tooltip', 'label', 'label_text', 'message',
+    'placeholder_text', 'subtitle', 'tab_title', 'text', 'title',
+    'tooltip_text', 'window_title',
+})
+_TSCN_PROP_RE = re.compile(
+    r'^(' + '|'.join(sorted(_TSCN_TEXT_PROPS)) + r')\s*=\s*"((?:[^"\\]|\\.)*)"',
+    re.MULTILINE,
+)
 
 
-def _extract_binary_resource(data: bytes, out: set) -> None:
-    if len(data) < 16 or data[:4] not in (_RSRC_MAGIC, _RSCC_MAGIC):
-        _brute_scan(data, out)
+def _extract_tscn(data: bytes, out: set) -> None:
+    try:
+        text = data.decode('utf-8', errors='replace')
+    except Exception:
         return
-    try:
-        buf = io.BytesIO(data)
-        buf.read(24)  # magic + endian + real64 + major + minor + format
-        major = struct.unpack_from('<I', data, 12)[0]
-        # resource type string
-        tlen = struct.unpack('<I', buf.read(4))[0]
-        if tlen > 512:
-            raise ValueError('type too large')
-        buf.read(tlen)
-        if major >= 4:
-            buf.read(40)  # uid + 4 × uint64 reserved
-        st_size = struct.unpack('<I', buf.read(4))[0]
-        if st_size > 200_000:
-            raise ValueError('string table too large')
-        for _ in range(st_size):
-            slen = struct.unpack('<I', buf.read(4))[0]
-            if slen > 8192:
-                buf.read(min(slen, 8192))
-                continue
-            raw = buf.read(slen)
-            try:
-                s = raw.decode('utf-8')
-                if _translatable(s):
-                    out.add(s)
-            except Exception:
-                pass
-    except Exception:
-        _brute_scan(data, out)
+    for m in _TSCN_PROP_RE.finditer(text):
+        s = m.group(2).replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
+        if _translatable(s):
+            out.add(s)
 
 
-def _apply_binary_resource(data: bytes, cache: dict) -> bytes:
-    if len(data) < 16 or data[:4] not in (_RSRC_MAGIC, _RSCC_MAGIC):
-        return data
+def _apply_tscn(data: bytes, cache: dict) -> bytes:
     try:
-        buf = io.BytesIO(data)
-        hdr = bytearray()
-        hdr += buf.read(24)
-        major = struct.unpack_from('<I', data, 12)[0]
-        tlen = struct.unpack('<I', buf.read(4))[0]
-        if tlen > 512:
-            return data
-        tdata = buf.read(tlen)
-        hdr += struct.pack('<I', tlen) + tdata
-        if major >= 4:
-            hdr += buf.read(40)
-        st_size = struct.unpack('<I', buf.read(4))[0]
-        if st_size > 200_000:
-            return data
-        old_entries = []
-        for _ in range(st_size):
-            slen = struct.unpack('<I', buf.read(4))[0]
-            raw  = buf.read(min(slen, 8192)) if slen <= 8192 else b''
-            old_entries.append(raw)
-        changed   = False
-        new_entries = []
-        for raw in old_entries:
-            try:
-                s  = raw.decode('utf-8')
-                tr = cache.get(s)
-                if tr and tr != s:
-                    new_entries.append(tr.encode('utf-8'))
-                    changed = True
-                    continue
-            except Exception:
-                pass
-            new_entries.append(raw)
-        if not changed:
-            return data
-        out = bytearray(hdr)
-        out += struct.pack('<I', st_size)
-        for raw in new_entries:
-            out += struct.pack('<I', len(raw)) + raw
-        out += buf.read()
-        return bytes(out)
+        text = data.decode('utf-8', errors='replace')
     except Exception:
         return data
 
+    def _repl(m: re.Match) -> str:
+        prop, content = m.group(1), m.group(2)
+        raw = content.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
+        tr = cache.get(raw)
+        if tr and tr != raw:
+            esc = (tr.replace('\\', '\\\\').replace('"', '\\"')
+                     .replace('\n', '\\n').replace('\t', '\\t'))
+            return f'{prop} = "{esc}"'
+        return m.group(0)
 
-def _brute_scan(data: bytes, out: set, min_n: int = 3, max_n: int = 512) -> None:
+    new_text = _TSCN_PROP_RE.sub(_repl, text)
+    return new_text.encode('utf-8') if new_text != text else data
+
+
+# ---------------------------------------------------------------------------
+# .csv — key column (first) preserved, value columns translated
+# ---------------------------------------------------------------------------
+
+def _csv_fields(line: str) -> list[str]:
+    fields: list[str] = []
     i = 0
-    dlen = len(data)
-    while i < dlen - 4:
-        n = struct.unpack_from('<I', data, i)[0]
-        if min_n <= n <= max_n and i + 4 + n <= dlen:
-            raw = data[i + 4: i + 4 + n]
-            try:
-                s = raw.decode('utf-8')
-                if _translatable(s):
-                    out.add(s)
-            except Exception:
-                pass
+    n = len(line)
+    while i <= n:
+        if i == n:
+            break
+        if line[i] == '"':
+            j, buf = i + 1, []
+            while j < n:
+                if line[j] == '"' and j + 1 < n and line[j + 1] == '"':
+                    buf.append('"')
+                    j += 2
+                elif line[j] == '"':
+                    j += 1
+                    break
+                else:
+                    buf.append(line[j])
+                    j += 1
+            fields.append(''.join(buf))
+            i = j + 1 if (j < n and line[j] == ',') else j
+        else:
+            end = line.find(',', i)
+            if end == -1:
+                fields.append(line[i:].strip())
+                break
+            fields.append(line[i:end].strip())
+            i = end + 1
+    return fields
+
+
+def _csv_quote(s: str) -> str:
+    return '"' + s.replace('"', '""') + '"' if (',' in s or '"' in s or '\n' in s) else s
+
+
+def _extract_csv(data: bytes, out: set) -> None:
+    try:
+        text = data.decode('utf-8-sig', errors='replace')
+    except Exception:
+        return
+    for line in text.splitlines()[1:]:   # skip header row
+        if not line.strip():
+            continue
+        for cell in _csv_fields(line)[1:]:   # skip key column
+            if _translatable(cell):
+                out.add(cell)
+
+
+def _apply_csv(data: bytes, cache: dict) -> bytes:
+    try:
+        text = data.decode('utf-8-sig', errors='replace')
+    except Exception:
+        return data
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return data
+    result = [lines[0]]
+    for line in lines[1:]:
+        stripped = line.rstrip('\r\n')
+        ending   = line[len(stripped):]
+        if not stripped.strip():
+            result.append(line)
+            continue
+        cells = _csv_fields(stripped)
+        if len(cells) < 2:
+            result.append(line)
+            continue
+        new_cells = [cells[0]]  # key: never touch
+        for cell in cells[1:]:
+            tr = cache.get(cell)
+            new_cells.append(tr if (tr and tr != cell) else cell)
+        result.append(','.join(_csv_quote(c) for c in new_cells) + ending)
+    new_text = ''.join(result)
+    return new_text.encode('utf-8') if new_text != text.lstrip('﻿') else data
+
+
+# ---------------------------------------------------------------------------
+# .json — only string values (keys are never sent to translation)
+# ---------------------------------------------------------------------------
+
+def _json_extract(obj: object, out: set) -> None:
+    if isinstance(obj, str):
+        if _translatable(obj):
+            out.add(obj)
+    elif isinstance(obj, list):
+        for item in obj:
+            _json_extract(item, out)
+    elif isinstance(obj, dict):
+        for v in obj.values():   # keys: identifiers, skip
+            _json_extract(v, out)
+
+
+def _json_apply(obj: object, cache: dict) -> object:
+    if isinstance(obj, str):
+        return cache.get(obj, obj)
+    if isinstance(obj, list):
+        return [_json_apply(i, cache) for i in obj]
+    if isinstance(obj, dict):
+        return {k: _json_apply(v, cache) for k, v in obj.items()}
+    return obj
+
+
+def _extract_json(data: bytes, out: set) -> None:
+    try:
+        _json_extract(json.loads(data.decode('utf-8-sig', errors='replace')), out)
+    except Exception:
+        pass
+
+
+def _apply_json(data: bytes, cache: dict) -> bytes:
+    try:
+        text = data.decode('utf-8-sig', errors='replace')
+        obj  = json.loads(text)
+        new  = _json_apply(obj, cache)
+        return json.dumps(new, ensure_ascii=False, indent=2).encode('utf-8') if new != obj else data
+    except Exception:
+        return data
+
+
+# ---------------------------------------------------------------------------
+# .po gettext — msgstr values only (msgid are keys, preserved)
+# ---------------------------------------------------------------------------
+
+_PO_MSGID_RE = re.compile(r'^msgid\s+"((?:[^"\\]|\\.)*)"', re.MULTILINE)
+
+
+def _extract_po(data: bytes, out: set) -> None:
+    try:
+        text = data.decode('utf-8', errors='replace')
+    except Exception:
+        return
+    for m in _PO_MSGID_RE.finditer(text):
+        s = m.group(1).replace('\\n', '\n').replace('\\"', '"')
+        if _translatable(s):
+            out.add(s)
+
+
+def _apply_po(data: bytes, cache: dict) -> bytes:
+    try:
+        text = data.decode('utf-8', errors='replace')
+    except Exception:
+        return data
+    lines = text.splitlines(keepends=True)
+    result: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        mid = re.match(r'^msgid\s+"((?:[^"\\]|\\.)*)"', line.rstrip())
+        if mid:
+            msgid = mid.group(1).replace('\\n', '\n').replace('\\"', '"')
+            result.append(line)
+            i += 1
+            while i < len(lines) and not lines[i].strip():
+                result.append(lines[i])
+                i += 1
+            if i < len(lines) and lines[i].lstrip().startswith('msgstr'):
+                ms = lines[i]
+                tr = cache.get(msgid)
+                if tr and tr != msgid:
+                    esc = tr.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                    ms = re.sub(r'^(\s*msgstr\s+)"[^"\\]*(?:\\.[^"\\]*)*"',
+                                rf'\1"{esc}"', ms)
+                result.append(ms)
+                i += 1
+            continue
+        result.append(line)
         i += 1
+    new_text = ''.join(result)
+    return new_text.encode('utf-8') if new_text != text else data
+
+
+# ---------------------------------------------------------------------------
+# Dispatch table
+# .scn / .res  — binary resource string tables hold property NAMES, not user text.
+#                Modifying them corrupts scene loading. Skipped.
+# .dtl / .dch  — Dialogic 2: encrypted in Godot 4 exports. Skipped.
+# .gdc         — compiled GDScript bytecode: not decompilable here. Skipped.
+# ---------------------------------------------------------------------------
+
+_HANDLERS: dict[str, tuple] = {
+    '.gd':   (_extract_gd,   _apply_gd),
+    '.tscn': (_extract_tscn, _apply_tscn),
+    '.tres': (_extract_tscn, _apply_tscn),
+    '.csv':  (_extract_csv,  _apply_csv),
+    '.json': (_extract_json, _apply_json),
+    '.po':   (_extract_po,   _apply_po),
+}
+_TEXT_EXTS = frozenset(_HANDLERS)
+
+_SKIP_EXTS = frozenset({'.scn', '.res', '.dtl', '.dch', '.gdc'})
 
 
 # ---------------------------------------------------------------------------
@@ -312,16 +488,19 @@ def _save_cache(cache_file: Path, cache: dict) -> None:
 # Translator
 # ---------------------------------------------------------------------------
 
-_TEXT_EXTS   = frozenset({'.gd', '.tscn', '.tres', '.csv', '.txt', '.json', '.po',
-                          '.dtl', '.dch'})   # Dialogic 2 timeline/character files
-_BINARY_EXTS = frozenset({'.scn', '.res', '.translation'})
-
-
 class GodotTranslator(BaseTranslator):
     """
-    Godot Engine 3/4 game translator.
-    Reads and rewrites .pck files (standalone exports).
-    Handles text-format scripts/scenes and binary resource string tables.
+    Godot 3/4 game translator. Reads and rewrites standalone .pck files.
+
+    Text formats handled (key/value isolation enforced):
+      .gd   — only tr() / atr() string literals
+      .tscn / .tres — only known text-bearing properties (text, tooltip_text, …)
+      .csv  — key column preserved; value columns translated
+      .json — only string values (keys never sent to AI)
+      .po   — msgstr values only; msgid preserved as keys
+
+    Skipped (binary / encrypted / bytecode):
+      .scn .res .dtl .dch .gdc
     """
 
     def _find_pck(self) -> Path | None:
@@ -352,7 +531,7 @@ class GodotTranslator(BaseTranslator):
         if glossary:
             self.log(f"Glossario: {len(glossary)} termos.")
 
-        # ── 1: Parse PCK ────────────────────────────────────────────────────
+        # ── 1: Parse PCK ──────────────────────────────────────────────────────
         size_mb = pck_path.stat().st_size // 1_048_576
         self.log(f"\n[1/4] Lendo PCK: {pck_path.name} ({size_mb} MB)...")
         self.set_progress(0.03, 'Lendo PCK...')
@@ -362,50 +541,60 @@ class GodotTranslator(BaseTranslator):
         except Exception as e:
             raise RuntimeError(f"Falha ao ler PCK: {e}")
 
-        gv = info['godot_ver']
+        gv    = info['godot_ver']
         files = info['files']
         self.log(f"  Godot {gv[0]}.{gv[1]}.{gv[2]} | v{info['version']} | {len(files)} arquivos")
 
-        text_files = [f for f in files if Path(f['path']).suffix.lower() in _TEXT_EXTS   and f['data']]
-        bin_files  = [f for f in files if Path(f['path']).suffix.lower() in _BINARY_EXTS and f['data']]
-        self.log(f"  Texto: {len(text_files)} | Binario: {len(bin_files)}")
+        text_files = [f for f in files
+                      if Path(f['path']).suffix.lower() in _TEXT_EXTS and f['data']]
+        skipped = {Path(f['path']).suffix.lower() for f in files
+                   if Path(f['path']).suffix.lower() in _SKIP_EXTS}
+        if skipped:
+            self.log(f"  Pulados (binario/criptografado): {', '.join(sorted(skipped))}")
+        self.log(f"  Arquivos de texto: {len(text_files)}")
 
-        # ── 2: Extract strings ───────────────────────────────────────────────
+        if not text_files:
+            self.log(
+                "\nAviso: nenhum arquivo de texto encontrado no PCK.\n"
+                "Jogos Godot 4 exportados compilam .tscn→.scn e .gd→.gdc.\n"
+                "Tradução de recursos binários não é suportada (risco de corrupção)."
+            )
+            self.set_progress(1.0, 'Nenhum arquivo traduzivel.')
+            return pck_path
+
+        # ── 2: Extract strings ─────────────────────────────────────────────────
         self.log('\n[2/4] Extraindo strings...')
         all_strings: set[str] = set()
-        n = max(len(text_files) + len(bin_files), 1)
+        n = max(len(text_files), 1)
 
         for i, f in enumerate(text_files):
+            ext = Path(f['path']).suffix.lower()
             self.set_progress(0.08 + 0.12 * i / n, f"Texto: {Path(f['path']).name}")
-            _extract_text_file(f['data'], all_strings)
-
-        for i, f in enumerate(bin_files):
-            self.set_progress(0.08 + 0.12 * (len(text_files) + i) / n,
-                              f"Binario: {Path(f['path']).name}")
-            _extract_binary_resource(f['data'], all_strings)
+            _HANDLERS[ext][0](f['data'], all_strings)
 
         to_translate = [s for s in sorted(all_strings) if not cache.get(s)]
         self.log(f"  {len(all_strings)} strings | cache: {len(cache)} | a traduzir: {len(to_translate)}")
 
-        # ── 3: Translate ─────────────────────────────────────────────────────
+        # ── 3: Translate ───────────────────────────────────────────────────────
         if to_translate:
             self.log(f"\n[3/4] Traduzindo {len(to_translate)} strings...")
             batch = 40
             total = len(to_translate)
             for i in range(0, total, batch):
                 chunk = to_translate[i: i + batch]
-                masked, tags_list, gloss_list = [], [], []
+                shield_data: list[tuple[list[str], list[str]]] = []
+                masked: list[str] = []
                 for s in chunk:
-                    m, tags  = mask_code_vars(s)
-                    m, gloss = mask_glossary(m, glossary)
-                    masked.append(m)
-                    tags_list.append(tags)
-                    gloss_list.append(gloss)
-                translated = translate_texts(masked, self.src_lang, self.tgt_lang, engine=self.engine)
-                translated = [
-                    unmask_code_vars(unmask_glossary(t, g), tags)
-                    for t, g, tags in zip(translated, gloss_list, tags_list)
-                ]
+                    s1, vtoks = _shield_vars(s)        # BBCode + printf + {named} + <tags>
+                    s2, gloss  = mask_glossary(s1, glossary)
+                    masked.append(s2)
+                    shield_data.append((vtoks, gloss))
+                raw_tr = translate_texts(masked, self.src_lang, self.tgt_lang, engine=self.engine)
+                translated: list[str] = []
+                for t, (vtoks, gloss) in zip(raw_tr, shield_data):
+                    t = unmask_glossary(t, gloss)
+                    t = _unshield_vars(t, vtoks)
+                    translated.append(t)
                 cache.update(zip(chunk, translated))
                 done = min(i + batch, total)
                 if done % 500 < batch or done >= total:
@@ -415,7 +604,7 @@ class GodotTranslator(BaseTranslator):
         else:
             self.log('\n[3/4] Tudo no cache.')
 
-        # ── 4: Repack ────────────────────────────────────────────────────────
+        # ── 4: Repack PCK ──────────────────────────────────────────────────────
         self.log('\n[4/4] Reempacotando PCK...')
         self.set_progress(0.82, 'Aplicando...')
 
@@ -427,12 +616,8 @@ class GodotTranslator(BaseTranslator):
 
         changed = 0
         for f in text_files:
-            new = _apply_text_file(f['data'], cache)
-            if new != f['data']:
-                f['data'] = new
-                changed += 1
-        for f in bin_files:
-            new = _apply_binary_resource(f['data'], cache)
+            ext = Path(f['path']).suffix.lower()
+            new = _HANDLERS[ext][1](f['data'], cache)
             if new != f['data']:
                 f['data'] = new
                 changed += 1
