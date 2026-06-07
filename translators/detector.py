@@ -4,16 +4,36 @@ import re
 from pathlib import Path
 
 
+_TWINE_MARKERS = ("tw-passagedata", "tw-storydata", "SugarCube", "Twine.version")
+
+
+def _is_twine_html(path: Path) -> bool:
+    try:
+        # Read in chunks — markers appear at various depths; 1 MB covers most cases.
+        # For huge files (>1 MB) with late markers we do a targeted tail search.
+        with path.open(encoding="utf-8", errors="ignore") as fh:
+            head = fh.read(1_000_000)
+        if any(m in head for m in _TWINE_MARKERS):
+            return True
+        # tw-passagedata can be near the end of very large compiled HTML exports
+        size = path.stat().st_size
+        if size > 1_000_000:
+            with path.open("rb") as fb:
+                fb.seek(max(0, size - 200_000))
+                tail = fb.read().decode("utf-8", errors="ignore")
+            if any(m in tail for m in _TWINE_MARKERS):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def detect_game_type(path: Path) -> str | None:
     if path.is_file():
         suffix = path.suffix.lower()
         if suffix in (".html", ".htm"):
-            try:
-                snippet = path.read_text(encoding="utf-8", errors="ignore")[:200_000]
-                if "tw-passagedata" in snippet:
-                    return "twine"
-            except Exception:
-                pass
+            if _is_twine_html(path):
+                return "twine"
         if suffix == ".exe":
             return detect_game_type(path.parent)
         return None
@@ -35,14 +55,10 @@ def detect_game_type(path: Path) -> str | None:
     if list(path.glob("**/*.rpy")) or list(path.glob("**/*.rpyc")):
         return "renpy"
 
-    # Twine: arquivo HTML na pasta
+    # Twine / SugarCube: HTML file in root
     for f in list(path.glob("*.html")) + list(path.glob("*.htm")):
-        try:
-            snippet = f.read_text(encoding="utf-8", errors="ignore")[:200_000]
-            if "tw-passagedata" in snippet:
-                return "twine"
-        except Exception:
-            continue
+        if _is_twine_html(f):
+            return "twine"
 
     # RPGMaker MV/MZ: data/System.json ou www/data/System.json
     if (path / "www" / "data" / "System.json").exists():
@@ -58,6 +74,33 @@ def detect_game_type(path: Path) -> str | None:
             if item.is_dir() and item.name.endswith("_Data"):
                 return "unity"
 
+    # Godot: project.godot / .pck next to exe / export_presets.cfg
+    if (path / "project.godot").exists() or (path / "export_presets.cfg").exists():
+        return "godot"
+    if list(path.glob("*.pck")):
+        return "godot"
+
+    # Wolf RPG Editor: Data.wolf or .wolf files in Data/ subdirectory
+    if (path / "Data.wolf").exists():
+        return "wolf"
+    data_dir = path / "Data"
+    if data_dir.is_dir() and list(data_dir.glob("*.wolf")):
+        return "wolf"
+    if list(path.glob("*.wolf")):
+        return "wolf"
+
+    # Unreal Engine: .pak in Paks/ subdirectory or .uproject
+    if list(path.glob("**/*.uproject"))[:1]:
+        return "unreal"
+    paks_candidates = [
+        path / "Content" / "Paks",
+        path / "WindowsNoEditor" / "Content" / "Paks",
+        path / "Windows" / "Content" / "Paks",
+    ]
+    for paks_dir in paks_candidates:
+        if paks_dir.is_dir() and list(paks_dir.glob("*.pak"))[:1]:
+            return "unreal"
+
     return None
 
 
@@ -66,6 +109,9 @@ GAME_TYPE_LABELS = {
     "renpy": "RenPy",
     "rpgmaker": "RPGMaker MV/MZ",
     "unity": "Unity",
+    "godot": "Godot 3 / 4",
+    "wolf": "Wolf RPG Editor",
+    "unreal": "Unreal Engine",
 }
 
 
