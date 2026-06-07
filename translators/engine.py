@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import os
 import re
 import stat
@@ -7,6 +8,112 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
+
+# ---------------------------------------------------------------------------
+# Pillar 3 — Code-variable shield  (shared masking, reused by every engine)
+# ---------------------------------------------------------------------------
+
+# Protects, as opaque [T#] placeholders, anything the game engine interpolates
+# at runtime and that must survive translation byte-for-byte:
+#   <...>            Unity / TextMeshPro Rich Text tags  (<b>, <color=#fff>, </size>)
+#   {0} {1} {name}   .NET / string.Format numbered & named slots
+#   %PLAYER_NAME% %VAR%   percent-delimited RPG variables
+_PROTECT_RE = re.compile(
+    r"<[^>]+>"                 # rich text tags
+    r"|\{[A-Za-z0-9_]+\}"      # {0}, {1}, {playerName}
+    r"|%[A-Za-z0-9_]+%"        # %PLAYER_NAME%, %VAR%
+)
+
+
+def mask_code_vars(s: str) -> tuple[str, list[str]]:
+    """Replace protected tokens (<tags>, {0}, %VAR%) with [T0], [T1]... placeholders.
+    Returns (masked_string, original_tokens)."""
+    tokens: list[str] = []
+
+    def _repl(m: "re.Match") -> str:
+        tokens.append(m.group(0))
+        return f"[T{len(tokens) - 1}]"
+
+    return _PROTECT_RE.sub(_repl, s), tokens
+
+
+def unmask_code_vars(s: str, tokens: list[str]) -> str:
+    """Restore [T0], [T1]... placeholders back to their original protected tokens."""
+    for idx, tok in enumerate(tokens):
+        s = s.replace(f"[T{idx}]", tok)
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Pillar 2 — Glossary / translation memory
+# ---------------------------------------------------------------------------
+
+_GLOSSARY_FILE = Path(__file__).resolve().parent.parent / "glossary.json"
+_glossary_cache: dict[str, str] | None = None
+_glossary_lock = threading.Lock()
+
+
+def load_glossary(force: bool = False) -> dict[str, str]:
+    """Load fixed term→translation pairs from glossary.json (cached). {} if absent."""
+    global _glossary_cache
+    if _glossary_cache is not None and not force:
+        return _glossary_cache
+    with _glossary_lock:
+        try:
+            data = json.loads(_GLOSSARY_FILE.read_text(encoding="utf-8"))
+            _glossary_cache = {
+                str(k): str(v) for k, v in data.items() if str(k).strip() and str(v).strip()
+            }
+        except Exception:
+            _glossary_cache = {}
+        return _glossary_cache
+
+
+def save_glossary(glossary: dict[str, str]) -> None:
+    """Persist glossary to glossary.json and refresh the in-memory cache."""
+    global _glossary_cache
+    with _glossary_lock:
+        try:
+            _GLOSSARY_FILE.write_text(
+                json.dumps(glossary, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            _glossary_cache = dict(glossary)
+        except Exception:
+            pass
+
+
+def mask_glossary(s: str, glossary: dict[str, str]) -> tuple[str, list[str]]:
+    """Replace each source term with a [G#] placeholder so offline engines never
+    retranslate it. Returns (masked_string, fixed_translations) — [G#] maps to the
+    exact glossary translation, restored verbatim by unmask_glossary."""
+    if not glossary:
+        return s, []
+    fixed: list[str] = []
+    # Longest term first so "Cursed Blade" matches before "Blade" (longest-match-first).
+    for term, translation in sorted(glossary.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if not term:
+            continue
+        # Word boundaries only where the term edge is a word char (so "%X%" still matches).
+        left = r"\b" if (term[:1].isalnum() or term[:1] == "_") else ""
+        right = r"\b" if (term[-1:].isalnum() or term[-1:] == "_") else ""
+        try:
+            pat = re.compile(left + re.escape(term) + right)
+        except re.error:
+            continue
+
+        def _repl(m: "re.Match", _tr=translation) -> str:
+            fixed.append(_tr)
+            return f"[G{len(fixed) - 1}]"
+
+        s = pat.sub(_repl, s)
+    return s, fixed
+
+
+def unmask_glossary(s: str, fixed: list[str]) -> str:
+    """Restore [G#] placeholders to their fixed glossary translations."""
+    for idx, tr in enumerate(fixed):
+        s = s.replace(f"[G{idx}]", tr)
+    return s
 
 # ---------------------------------------------------------------------------
 # Language detection helpers
@@ -552,9 +659,15 @@ def _translate_google(texts: list[str], src: str, tgt: str) -> list[str]:
             for j, tr in zip(idxs, translated):
                 row[j] = tr or chunk[j]
             result.extend(row)
-        except Exception:
+            if i > 0:
+                time.sleep(0.3)  # polite inter-chunk delay
+        except Exception as e:
             result.extend(chunk)  # fallback: keep original on error
-        time.sleep(1.5)  # anti-ban: avoid HTTP 429 on large games
+            # Back off significantly only on rate-limit responses
+            if "429" in str(e) or "Too Many Requests" in str(e):
+                time.sleep(5.0)
+            else:
+                time.sleep(0.3)
 
     return result
 
@@ -571,20 +684,36 @@ def refazer_com_ia_litellm(
     api_key: str = "",
     base_url: str = "",
 ) -> str:
-    """Translate a single text via LiteLLM (any provider: OpenAI, Gemini, Ollama, etc.)."""
+    """Translate a single text via LiteLLM (any provider: OpenAI, Gemini, Ollama, etc.).
+    Applies the glossary (Pillar 2) via system prompt and shields code variables
+    (Pillar 3) by masking them before sending and restoring them after."""
     import litellm
+
+    # Pillar 3 — mask <tags>, {0}, %VAR% so the model never alters them.
+    masked, tokens = mask_code_vars(texto_original)
+
+    # Pillar 2 — inject fixed translations into the system prompt.
+    glossary = load_glossary()
+    glossary_block = ""
+    if glossary:
+        pairs = "\n".join(f"  - {k} = {v}" for k, v in glossary.items())
+        glossary_block = (
+            "Always use these EXACT fixed translations for the following terms "
+            "(keep them verbatim, never retranslate them):\n" + pairs + "\n"
+        )
 
     system_prompt = (
         f"You are a professional game localization translator. "
         f"Translate the following text from {src_lang} to {tgt_lang}. "
         "Preserve placeholder tokens like [T0], [T1], [T2] exactly as written. "
+        + glossary_block +
         "Return ONLY the translated text — no explanations, no quotes."
     )
     kwargs: dict = {
         "model": model_name,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": texto_original},
+            {"role": "user", "content": masked},
         ],
     }
     if api_key:
@@ -593,7 +722,8 @@ def refazer_com_ia_litellm(
         kwargs["base_url"] = base_url
 
     response = litellm.completion(**kwargs)
-    return response.choices[0].message.content.strip()
+    result = response.choices[0].message.content.strip()
+    return unmask_code_vars(result, tokens)
 
 
 def translate_texts(texts: list[str], src: str, tgt: str, workers: int = 0, engine: str = "local") -> list[str]:

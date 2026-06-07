@@ -2,6 +2,7 @@
 """Game Translator — Interface gráfica."""
 from __future__ import annotations
 
+import csv
 import json
 import locale
 import multiprocessing
@@ -17,11 +18,15 @@ from translators.detector import detect_game_type, GAME_TYPE_LABELS, sample_game
 from translators.engine import (
     _hw_config, _gpu_libs_dir, _GPU_KEY_DLL,
     download_gpu_libs, detect_source_language,
+    load_glossary, save_glossary,
 )
 from translators.twine import TwineTranslator
 from translators.renpy import RenpyTranslator
 from translators.rpgmaker import RPGMakerTranslator
-from translators.unity import UnityTranslator
+from translators.unity import UnityTranslator, inject_font
+from translators.godot import GodotTranslator
+from translators.wolf import WolfRPGTranslator
+from translators.unreal import UnrealTranslator
 
 # ---------------------------------------------------------------------------
 # I18n
@@ -31,8 +36,10 @@ APP_TEXTS: dict[str, dict[str, str]] = {
     "pt": {
         "nav_translate":         "Tradução",
         "nav_review":            "Revisão",
+        "nav_glossary":          "Glossário",
+        "nav_fonts":             "Fontes",
         "nav_settings":          "Configurações",
-        "app_subtitle":          "Twine  |  RenPy  |  RPGMaker  |  Unity",
+        "app_subtitle":          "Twine  |  RenPy  |  RPGMaker  |  Unity  |  Godot  |  Wolf RPG  |  Unreal",
         "lbl_game_dir":          "Jogo / Diretório",
         "ph_game_dir":           "Selecione a pasta ou arquivo do jogo...",
         "btn_folder":            "Pasta",
@@ -79,10 +86,21 @@ APP_TEXTS: dict[str, dict[str, str]] = {
         "review_btn_google":      "Traduzir (Google)",
         "review_google_busy":    "Traduzindo...",
         "review_load_more":      "Carregar mais {n} resultados...",
+        "review_btn_bulk":       "✨ Revisar Tudo com IA",
+        "review_bulk_running":   "⏹ Cancelar",
+        "review_bulk_progress":  "Revisando: {done} / {total} textos...",
+        "review_bulk_done":      "✔ Revisão concluída! {n} textos atualizados.",
+        "review_bulk_no_cache":  "Carregue um cache antes de revisar.",
+        "review_bulk_saving":    "Salvamento automático: {n} entradas...",
         "review_btn_load":       "Carregar Cache",
         "review_ph_search":      "Buscar original ou tradução...",
         "review_btn_search":     "Buscar",
         "review_btn_save":       "Salvar Alterações",
+        "review_btn_export_csv": "📥 Exportar CSV",
+        "review_btn_import_csv": "📤 Importar CSV",
+        "review_csv_exported":   "✔ {n} entradas exportadas para {name}.",
+        "review_csv_imported":   "✔ {n} entradas importadas de {name}.",
+        "review_csv_err":        "Erro no CSV: {err}",
         "review_status_loaded":  "Arquivo: {name}  |  {n} entradas",
         "review_status_showing": "Mostrando {n} de {total} (máx. 50)",
         "review_no_path":        "Selecione o jogo na aba Tradução primeiro.",
@@ -127,6 +145,27 @@ APP_TEXTS: dict[str, dict[str, str]] = {
         "warn_no_apikey_msg":    "API Key não encontrada!\n\nVá até 'Configurações' e insira sua chave para usar os recursos avançados de IA.",
         "warn_no_model_title":   "Modelo não configurado",
         "warn_no_model_msg":     "Configure o nome do modelo na aba 'Configurações' antes de usar a IA.",
+        "glossary_title":        "Glossário de Termos",
+        "glossary_hint":         "Traduções fixas aplicadas em todos os motores (IA via prompt, offline via substituição).",
+        "glossary_ph_orig":      "Termo Original (ex: Cursed Blade)",
+        "glossary_ph_trad":      "Tradução Exata (ex: Lâmina Amaldiçoada)",
+        "glossary_btn_add":      "Adicionar",
+        "glossary_empty":        "Nenhum termo no glossário ainda.",
+        "fonts_title":           "Injetor de Fontes (Anti-Tofu)",
+        "fonts_hint":            "Substitui a fonte embutida do jogo para renderizar acentos (ç ã é).\nFunciona em Fontes dinâmicas legadas. Bitmap e TMP_FontAsset (SDF) não são suportadas por troca de bytes.",
+        "fonts_select_ttf":      "Selecionar Fonte (.ttf)",
+        "fonts_select_target":   "Selecionar Arquivo do Jogo",
+        "fonts_btn_inject":      "Injetar no Jogo",
+        "fonts_injecting":       "Injetando fonte...",
+        "fonts_lbl_ttf":         "Fonte:",
+        "fonts_lbl_target":      "Alvo:",
+        "fonts_ttf_none":        "Nenhuma fonte selecionada",
+        "fonts_target_none":     "Nenhum arquivo selecionado",
+        "fonts_no_ttf":          "Selecione um arquivo .ttf primeiro.",
+        "fonts_no_target":       "Selecione o arquivo do jogo (data.unity3d / sharedassets).",
+        "fonts_done":            "✔ {n} fonte(s) substituída(s). Bitmap: {bmp} | TMP/SDF: {tmp} (ignoradas).",
+        "fonts_none":            "Nenhuma fonte dinâmica encontrada. Bitmap: {bmp} | TMP/SDF: {tmp} (não suportadas).",
+        "fonts_error":           "Erro: {err}",
         "screen_settings_title": "Configurações",
         "settings_lang":         "Idioma do aplicativo",
         "settings_theme":        "Tema",
@@ -134,12 +173,18 @@ APP_TEXTS: dict[str, dict[str, str]] = {
         "theme_dark":            "Escuro",
         "theme_light":           "Claro",
         "theme_system":          "Sistema",
+        "review_btn_prev":       "Anterior",
+        "review_btn_next":       "Próximo",
+        "review_page_info_page": "Página ",
+        "review_page_info_of":   " de {total}",
     },
     "en": {
         "nav_translate":         "Translation",
         "nav_review":            "Review",
+        "nav_glossary":          "Glossary",
+        "nav_fonts":             "Fonts",
         "nav_settings":          "Settings",
-        "app_subtitle":          "Twine  |  RenPy  |  RPGMaker  |  Unity",
+        "app_subtitle":          "Twine  |  RenPy  |  RPGMaker  |  Unity  |  Godot  |  Wolf RPG  |  Unreal",
         "lbl_game_dir":          "Game / Directory",
         "ph_game_dir":           "Select the game folder or file...",
         "btn_folder":            "Folder",
@@ -186,10 +231,21 @@ APP_TEXTS: dict[str, dict[str, str]] = {
         "review_btn_google":      "Translate (Google)",
         "review_google_busy":    "Translating...",
         "review_load_more":      "Load {n} more results...",
+        "review_btn_bulk":       "✨ Review All with AI",
+        "review_bulk_running":   "⏹ Cancel",
+        "review_bulk_progress":  "Reviewing: {done} / {total} texts...",
+        "review_bulk_done":      "✔ Review complete! {n} texts updated.",
+        "review_bulk_no_cache":  "Load a cache before reviewing.",
+        "review_bulk_saving":    "Auto-saving: {n} entries...",
         "review_btn_load":       "Load Cache",
         "review_ph_search":      "Search original or translation...",
         "review_btn_search":     "Search",
         "review_btn_save":       "Save Changes",
+        "review_btn_export_csv": "📥 Export CSV",
+        "review_btn_import_csv": "📤 Import CSV",
+        "review_csv_exported":   "✔ {n} entries exported to {name}.",
+        "review_csv_imported":   "✔ {n} entries imported from {name}.",
+        "review_csv_err":        "CSV error: {err}",
         "review_status_loaded":  "File: {name}  |  {n} entries",
         "review_status_showing": "Showing {n} of {total} (max 50)",
         "review_no_path":        "Select the game in the Translation tab first.",
@@ -234,6 +290,27 @@ APP_TEXTS: dict[str, dict[str, str]] = {
         "warn_no_apikey_msg":    "API Key not found!\n\nGo to 'Settings' and enter your key to use advanced AI features.",
         "warn_no_model_title":   "Model Not Configured",
         "warn_no_model_msg":     "Configure a model name in 'Settings' before using AI.",
+        "glossary_title":        "Term Glossary",
+        "glossary_hint":         "Fixed translations applied across all engines (AI via prompt, offline via replacement).",
+        "glossary_ph_orig":      "Original Term (e.g. Cursed Blade)",
+        "glossary_ph_trad":      "Exact Translation (e.g. Lâmina Amaldiçoada)",
+        "glossary_btn_add":      "Add",
+        "glossary_empty":        "No glossary terms yet.",
+        "fonts_title":           "Font Injector (Anti-Tofu)",
+        "fonts_hint":            "Replaces the game's embedded font so accents (ç ã é) render.\nWorks on legacy dynamic Fonts. Bitmap and TMP_FontAsset (SDF) are not supported by a byte swap.",
+        "fonts_select_ttf":      "Select Font (.ttf)",
+        "fonts_select_target":   "Select Game File",
+        "fonts_btn_inject":      "Inject into Game",
+        "fonts_injecting":       "Injecting font...",
+        "fonts_lbl_ttf":         "Font:",
+        "fonts_lbl_target":      "Target:",
+        "fonts_ttf_none":        "No font selected",
+        "fonts_target_none":     "No file selected",
+        "fonts_no_ttf":          "Select a .ttf file first.",
+        "fonts_no_target":       "Select the game file (data.unity3d / sharedassets).",
+        "fonts_done":            "✔ {n} font(s) replaced. Bitmap: {bmp} | TMP/SDF: {tmp} (skipped).",
+        "fonts_none":            "No dynamic fonts found. Bitmap: {bmp} | TMP/SDF: {tmp} (unsupported).",
+        "fonts_error":           "Error: {err}",
         "screen_settings_title": "Settings",
         "settings_lang":         "App language",
         "settings_theme":        "Theme",
@@ -241,12 +318,16 @@ APP_TEXTS: dict[str, dict[str, str]] = {
         "theme_dark":            "Dark",
         "theme_light":           "Light",
         "theme_system":          "System",
+        "review_btn_prev":       "Previous",
+        "review_btn_next":       "Next",
+        "review_page_info_page": "Page ",
+        "review_page_info_of":   " of {total}",
     },
     "ru": {
         "nav_translate":         "Перевод",
         "nav_review":            "Проверка",
         "nav_settings":          "Настройки",
-        "app_subtitle":          "Twine  |  RenPy  |  RPGMaker  |  Unity",
+        "app_subtitle":          "Twine  |  RenPy  |  RPGMaker  |  Unity  |  Godot  |  Wolf RPG  |  Unreal",
         "btn_translate":         "Перевести",
         "btn_finished":          "Готово!",
         "btn_cancel":            "Отмена",
@@ -284,12 +365,20 @@ APP_TEXTS: dict[str, dict[str, str]] = {
         "review_btn_google":     "Перевод (Google)",
         "review_redo_btn":       "✨ ИИ-перевод",
         "review_load_more":      "Загрузить ещё {n}...",
+        "review_btn_bulk":       "✨ Проверить всё с ИИ",
+        "review_bulk_running":   "⏹ Отмена",
+        "review_bulk_progress":  "Проверка: {done} / {total}...",
+        "review_bulk_done":      "✔ Готово! {n} обновлено.",
+        "review_btn_prev":       "Назад",
+        "review_btn_next":       "Вперед",
+        "review_page_info_page": "Страница ",
+        "review_page_info_of":   " из {total}",
     },
     "ja": {
         "nav_translate":         "翻訳",
         "nav_review":            "確認",
         "nav_settings":          "設定",
-        "app_subtitle":          "Twine  |  RenPy  |  RPGMaker  |  Unity",
+        "app_subtitle":          "Twine  |  RenPy  |  RPGMaker  |  Unity  |  Godot  |  Wolf RPG  |  Unreal",
         "btn_translate":         "今すぐ翻訳",
         "btn_finished":          "完了！",
         "btn_cancel":            "キャンセル",
@@ -327,12 +416,20 @@ APP_TEXTS: dict[str, dict[str, str]] = {
         "review_btn_google":     "Google翻訳",
         "review_redo_btn":       "✨ AIで再翻訳",
         "review_load_more":      "さらに{n}件読み込む...",
+        "review_btn_bulk":       "✨ AIで全て確認",
+        "review_bulk_running":   "⏹ キャンセル",
+        "review_bulk_progress":  "確認中: {done} / {total}...",
+        "review_bulk_done":      "✔ 完了！{n} 件更新。",
+        "review_btn_prev":       "前へ",
+        "review_btn_next":       "次へ",
+        "review_page_info_page": "ページ ",
+        "review_page_info_of":   " / {total}",
     },
     "ko": {
         "nav_translate":         "번역",
         "nav_review":            "검토",
         "nav_settings":          "설정",
-        "app_subtitle":          "Twine  |  RenPy  |  RPGMaker  |  Unity",
+        "app_subtitle":          "Twine  |  RenPy  |  RPGMaker  |  Unity  |  Godot  |  Wolf RPG  |  Unreal",
         "btn_translate":         "지금 번역",
         "btn_finished":          "완료！",
         "btn_cancel":            "취소",
@@ -370,6 +467,14 @@ APP_TEXTS: dict[str, dict[str, str]] = {
         "review_btn_google":     "Google 번역",
         "review_redo_btn":       "✨ AI 재번역",
         "review_load_more":      "{n}개 더 불러오기...",
+        "review_btn_bulk":       "✨ AI로 전체 검토",
+        "review_bulk_running":   "⏹ 취소",
+        "review_bulk_progress":  "검토 중: {done} / {total}...",
+        "review_bulk_done":      "✔ 완료！{n} 건 업데이트。",
+        "review_btn_prev":       "이전",
+        "review_btn_next":       "다음",
+        "review_page_info_page": "페이지 ",
+        "review_page_info_of":   " / {total}",
     },
 }
 
@@ -455,6 +560,9 @@ GAME_TYPES: dict[str, str | None] = {
     "RenPy":             "renpy",
     "RPGMaker MV/MZ":    "rpgmaker",
     "Unity":             "unity",
+    "Godot 3 / 4":       "godot",
+    "Wolf RPG Editor":   "wolf",
+    "Unreal Engine":     "unreal",
 }
 
 TRANSLATORS = {
@@ -462,6 +570,9 @@ TRANSLATORS = {
     "renpy":    RenpyTranslator,
     "rpgmaker": RPGMakerTranslator,
     "unity":    UnityTranslator,
+    "godot":    GodotTranslator,
+    "wolf":     WolfRPGTranslator,
+    "unreal":   UnrealTranslator,
 }
 
 # ---------------------------------------------------------------------------
@@ -535,7 +646,7 @@ class App(ctk.CTk):
         super().__init__()
         self.title("Game Translator")
         self.geometry("940x680")
-        self.minsize(760, 560)
+        self.minsize(800, 600)
 
         self._translating = False
         self._progress_indeterminate = False
@@ -555,10 +666,26 @@ class App(ctk.CTk):
         self._review_textboxes: dict[str, ctk.CTkTextbox] = {}
         self._review_cards: list[ctk.CTkFrame] = []
         self._itens_filtrados: list = []
-        self._itens_exibidos: int = 0
+        self._review_page: int = 0
+        self._itens_por_pagina: int = 50
+        self._current_screen: str = "translate"
+        self._sidebar_visible: bool = True
+
+        # Resize Debouncer
+        self._resize_timer = None
+        self._tamanho_anterior = (self.winfo_width(), self.winfo_height())
+        self.bind("<Configure>", self._on_window_resize)
+
+        # Hotkeys for pagination
+        self.bind("<Left>", self._on_arrow_left)
+        self.bind("<Right>", self._on_arrow_right)
 
         # Settings AI help panel state
         self._help_visible: bool = False
+
+        # Bulk review state
+        self._bulk_review_running: bool = False
+        self._bulk_review_stop: bool = False
 
         self._build_ui()
         self._show_screen("translate")
@@ -580,8 +707,18 @@ class App(ctk.CTk):
         self._content.grid_columnconfigure(0, weight=1)
         self._content.grid_rowconfigure(0, weight=1)
 
+        # Main hamburger toggle button (floating, hidden initially)
+        self._main_toggle_btn = ctk.CTkButton(
+            self._content, text="☰", width=30, height=30,
+            fg_color="transparent", text_color=("#000000", "#FFFFFF"), hover_color=("gray80", "gray25"),
+            font=ctk.CTkFont(size=16, weight="bold"),
+            command=self._toggle_sidebar
+        )
+
         self._screens["translate"] = self._build_translate_screen(self._content)
         self._screens["review"]    = self._build_review_screen(self._content)
+        self._screens["glossary"]  = self._build_glossary_screen(self._content)
+        self._screens["fonts"]     = self._build_fonts_screen(self._content)
         self._screens["settings"]  = self._build_settings_screen(self._content)
 
     def _build_sidebar(self):
@@ -590,6 +727,16 @@ class App(ctk.CTk):
         sb.grid_propagate(False)
         sb.grid_columnconfigure(0, weight=1)
         sb.grid_rowconfigure(10, weight=1)
+        self._sidebar = sb
+
+        # Sidebar hamburger toggle button
+        self._sb_toggle_btn = ctk.CTkButton(
+            sb, text="☰", width=30, height=30,
+            fg_color="transparent", text_color=("#000000", "#FFFFFF"), hover_color=("gray80", "gray25"),
+            font=ctk.CTkFont(size=16, weight="bold"),
+            command=self._toggle_sidebar
+        )
+        self._sb_toggle_btn.place(x=10, y=10)
 
         ctk.CTkLabel(
             sb,
@@ -601,6 +748,8 @@ class App(ctk.CTk):
         for idx, (key, text_key) in enumerate([
             ("translate", "nav_translate"),
             ("review",    "nav_review"),
+            ("glossary",  "nav_glossary"),
+            ("fonts",     "nav_fonts"),
             ("settings",  "nav_settings"),
         ]):
             btn = ctk.CTkButton(
@@ -622,11 +771,25 @@ class App(ctk.CTk):
         ).grid(row=11, column=0, pady=(0, 14))
 
     def _show_screen(self, key: str):
+        self._current_screen = key
         for frame in self._screens.values():
             frame.grid_forget()
         self._screens[key].grid(row=0, column=0, sticky="nsew")
         for k, btn in self._nav_btns.items():
             btn.configure(fg_color=(_BTN_DEFAULT if k == key else "transparent"))
+        if not getattr(self, "_sidebar_visible", True):
+            self._main_toggle_btn.lift()
+
+    def _toggle_sidebar(self):
+        if self._sidebar_visible:
+            self._sidebar.grid_forget()
+            self._main_toggle_btn.place(x=10, y=10)
+            self._main_toggle_btn.lift()
+            self._sidebar_visible = False
+        else:
+            self._sidebar.grid(row=0, column=0, sticky="nsw")
+            self._main_toggle_btn.place_forget()
+            self._sidebar_visible = True
 
     # ── Translation screen ───────────────────────────────────────────
 
@@ -637,7 +800,7 @@ class App(ctk.CTk):
 
         # Screen header
         hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.grid(row=0, column=0, padx=24, pady=(20, 8), sticky="ew")
+        hdr.grid(row=0, column=0, padx=(55, 24), pady=(20, 8), sticky="ew")
         ctk.CTkLabel(hdr, text=_t("nav_translate"), font=ctk.CTkFont(size=20, weight="bold")).pack(side="left")
         ctk.CTkLabel(
             hdr, text=_t("app_subtitle"), font=ctk.CTkFont(size=11), text_color="gray"
@@ -777,12 +940,12 @@ class App(ctk.CTk):
     def _build_review_screen(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(parent, fg_color="transparent")
         frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(3, weight=1)
+        frame.grid_rowconfigure(4, weight=1)
 
         # Header
         ctk.CTkLabel(
             frame, text=_t("screen_review_title"), font=ctk.CTkFont(size=20, weight="bold")
-        ).grid(row=0, column=0, padx=24, pady=(24, 8), sticky="w")
+        ).grid(row=0, column=0, padx=(55, 24), pady=(24, 8), sticky="w")
 
         # Controls bar
         ctrl = ctk.CTkFrame(frame)
@@ -791,7 +954,7 @@ class App(ctk.CTk):
         ctk.CTkButton(
             ctrl, text=_t("review_btn_load"), width=130,
             command=self._load_review_cache,
-        ).pack(side="left", padx=(12, 6), pady=10)
+        ).pack(side="left", expand=False, padx=(12, 6), pady=10)
 
         self._review_search_var = ctk.StringVar()
         search_entry = ctk.CTkEntry(
@@ -807,13 +970,32 @@ class App(ctk.CTk):
         ctk.CTkButton(
             ctrl, text=_t("review_btn_search"), width=80,
             command=lambda: self._render_review_cards(self._review_search_var.get()),
-        ).pack(side="left", padx=6, pady=10)
+        ).pack(side="left", expand=False, padx=6, pady=10)
 
         ctk.CTkButton(
             ctrl, text=_t("review_btn_save"), width=150,
             fg_color="#27AE60", hover_color="#219A52",
             command=self._save_review,
-        ).pack(side="left", padx=(6, 12), pady=10)
+        ).pack(side="left", expand=False, padx=(6, 8), pady=10)
+
+        ctk.CTkButton(
+            ctrl, text=_t("review_btn_export_csv"), width=130,
+            fg_color="#2C3E50", hover_color="#34495E",
+            command=self._export_csv,
+        ).pack(side="left", expand=False, padx=(0, 6), pady=10)
+
+        ctk.CTkButton(
+            ctrl, text=_t("review_btn_import_csv"), width=130,
+            fg_color="#2C3E50", hover_color="#34495E",
+            command=self._import_csv,
+        ).pack(side="left", expand=False, padx=(0, 8), pady=10)
+
+        self._bulk_btn = ctk.CTkButton(
+            ctrl, text=_t("review_btn_bulk"), width=190,
+            fg_color="#6C3483", hover_color="#8E44AD",
+            command=self._iniciar_revisao_em_massa,
+        )
+        self._bulk_btn.pack(side="left", expand=False, padx=(0, 12), pady=10)
 
         # Status line
         self._review_status_lbl = ctk.CTkLabel(
@@ -822,12 +1004,314 @@ class App(ctk.CTk):
         )
         self._review_status_lbl.grid(row=2, column=0, padx=28, pady=(0, 2), sticky="w")
 
+        # Bulk progress row (hidden until bulk review starts)
+        self._bulk_progress_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        self._bulk_progress_frame.grid(row=3, column=0, padx=24, pady=(0, 4), sticky="ew")
+        self._bulk_progress_frame.grid_columnconfigure(0, weight=1)
+        self._bulk_progress_bar = ctk.CTkProgressBar(self._bulk_progress_frame, height=8)
+        self._bulk_progress_bar.set(0)
+        self._bulk_progress_bar.grid(row=0, column=0, sticky="ew", pady=(0, 2))
+        self._bulk_progress_lbl = ctk.CTkLabel(
+            self._bulk_progress_frame, text="",
+            text_color="gray", font=ctk.CTkFont(size=10),
+        )
+        self._bulk_progress_lbl.grid(row=1, column=0, sticky="w")
+        self._bulk_progress_frame.grid_remove()
+
         # Scrollable card area
         self._review_scroll = ctk.CTkScrollableFrame(frame, fg_color="transparent")
-        self._review_scroll.grid(row=3, column=0, padx=24, pady=(0, 16), sticky="nsew")
+        self._review_scroll.grid(row=4, column=0, padx=24, pady=(0, 8), sticky="nsew")
         self._review_scroll.grid_columnconfigure(0, weight=1)
 
+        # Pagination controls
+        self._pag_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        self._pag_frame.grid(row=5, column=0, padx=24, pady=(0, 16), sticky="ew")
+        
+        self._pag_frame.grid_columnconfigure(0, weight=1)
+        self._pag_frame.grid_columnconfigure(4, weight=1)
+
+        self._btn_prev = ctk.CTkButton(
+            self._pag_frame,
+            text="◀  " + _t("review_btn_prev"),
+            width=110,
+            height=32,
+            fg_color="#2B2B36",
+            hover_color="#3D3D50",
+            text_color="#FFFFFF",
+            corner_radius=8,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._prev_page,
+        )
+        self._btn_prev.grid(row=0, column=1, padx=8, pady=4, sticky="e")
+
+        # Fast travel controls (mini-form)
+        self._jump_frame = ctk.CTkFrame(self._pag_frame, fg_color="transparent")
+        self._jump_frame.grid(row=0, column=2, padx=16, pady=4)
+        
+        ctk.CTkLabel(
+            self._jump_frame,
+            text=_t("review_page_info_page"),
+            text_color="#8A8A93",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(side="left")
+        
+        self._page_jump_entry = ctk.CTkEntry(
+            self._jump_frame,
+            width=45,
+            height=26,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            justify="center",
+        )
+        self._page_jump_entry.pack(side="left", padx=4)
+        self._page_jump_entry.bind("<Return>", lambda e: self._jump_to_page())
+        
+        self._lbl_page_total = ctk.CTkLabel(
+            self._jump_frame,
+            text="",
+            text_color="#8A8A93",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self._lbl_page_total.pack(side="left")
+
+        self._btn_next = ctk.CTkButton(
+            self._pag_frame,
+            text=_t("review_btn_next") + "  ▶",
+            width=110,
+            height=32,
+            fg_color="#2B2B36",
+            hover_color="#3D3D50",
+            text_color="#FFFFFF",
+            corner_radius=8,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._next_page,
+        )
+        self._btn_next.grid(row=0, column=3, padx=8, pady=4, sticky="w")
+        
+        self._pag_frame.grid_remove() # Hidden initially
+
         return frame
+
+    # ── Glossary screen (Pillar 2) ───────────────────────────────────
+
+    def _build_glossary_screen(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(3, weight=1)
+
+        ctk.CTkLabel(
+            frame, text=_t("glossary_title"), font=ctk.CTkFont(size=20, weight="bold")
+        ).grid(row=0, column=0, padx=(55, 24), pady=(24, 4), sticky="w")
+        ctk.CTkLabel(
+            frame, text=_t("glossary_hint"), text_color="gray", font=ctk.CTkFont(size=11),
+            justify="left",
+        ).grid(row=1, column=0, padx=28, pady=(0, 8), sticky="w")
+
+        # Add-term form
+        form = ctk.CTkFrame(frame)
+        form.grid(row=2, column=0, padx=24, pady=(0, 8), sticky="ew")
+        form.grid_columnconfigure(0, weight=1)
+        form.grid_columnconfigure(1, weight=1)
+
+        self._gloss_orig_var = ctk.StringVar()
+        self._gloss_trad_var = ctk.StringVar()
+        e1 = ctk.CTkEntry(form, textvariable=self._gloss_orig_var, placeholder_text=_t("glossary_ph_orig"))
+        e1.grid(row=0, column=0, padx=(12, 6), pady=12, sticky="ew")
+        e2 = ctk.CTkEntry(form, textvariable=self._gloss_trad_var, placeholder_text=_t("glossary_ph_trad"))
+        e2.grid(row=0, column=1, padx=6, pady=12, sticky="ew")
+        ctk.CTkButton(
+            form, text=_t("glossary_btn_add"), width=110,
+            fg_color="#27AE60", hover_color="#219A52",
+            command=self._add_glossary_term,
+        ).grid(row=0, column=2, padx=(6, 12), pady=12)
+        e1.bind("<Return>", lambda e: self._add_glossary_term())
+        e2.bind("<Return>", lambda e: self._add_glossary_term())
+
+        # Term list
+        self._gloss_scroll = ctk.CTkScrollableFrame(frame, fg_color="transparent")
+        self._gloss_scroll.grid(row=3, column=0, padx=24, pady=(0, 16), sticky="nsew")
+        self._gloss_scroll.grid_columnconfigure(0, weight=1)
+
+        self._gloss_rows: list[ctk.CTkBaseClass] = []
+        self._glossary: dict[str, str] = load_glossary(force=True)
+        self._render_glossary()
+
+        return frame
+
+    def _render_glossary(self) -> None:
+        for r in self._gloss_rows:
+            r.destroy()
+        self._gloss_rows.clear()
+
+        if not self._glossary:
+            lbl = ctk.CTkLabel(
+                self._gloss_scroll, text=_t("glossary_empty"), text_color="gray"
+            )
+            lbl.grid(row=0, column=0, pady=20)
+            self._gloss_rows.append(lbl)
+            return
+
+        for idx, (term, trad) in enumerate(sorted(self._glossary.items())):
+            row = ctk.CTkFrame(self._gloss_scroll, fg_color="#1E1E24", corner_radius=8)
+            row.grid(row=idx, column=0, padx=4, pady=3, sticky="ew")
+            row.grid_columnconfigure(0, weight=1)
+            row.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(
+                row, text=term, anchor="w", text_color="#E0E0E0",
+                wraplength=240, justify="left",
+            ).grid(row=0, column=0, padx=(12, 6), pady=8, sticky="w")
+            ctk.CTkLabel(
+                row, text="→ " + trad, anchor="w", text_color="#3EA6FF",
+                wraplength=240, justify="left",
+            ).grid(row=0, column=1, padx=6, pady=8, sticky="w")
+            ctk.CTkButton(
+                row, text="🗑", width=36, height=28,
+                fg_color="#A51F1F", hover_color="#C0392B",
+                command=lambda t=term: self._remove_glossary_term(t),
+            ).grid(row=0, column=2, padx=(6, 12), pady=6)
+            self._gloss_rows.append(row)
+
+    def _add_glossary_term(self) -> None:
+        term = self._gloss_orig_var.get().strip()
+        trad = self._gloss_trad_var.get().strip()
+        if not term or not trad:
+            return
+        self._glossary[term] = trad
+        save_glossary(self._glossary)
+        self._gloss_orig_var.set("")
+        self._gloss_trad_var.set("")
+        self._render_glossary()
+
+    def _remove_glossary_term(self, term: str) -> None:
+        self._glossary.pop(term, None)
+        save_glossary(self._glossary)
+        self._render_glossary()
+
+    # ── Fonts screen (Pillar 1) ──────────────────────────────────────
+
+    def _build_fonts_screen(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(4, weight=1)
+
+        self._font_ttf_path: Path | None = None
+        self._font_target_path: Path | None = None
+
+        ctk.CTkLabel(
+            frame, text=_t("fonts_title"), font=ctk.CTkFont(size=20, weight="bold")
+        ).grid(row=0, column=0, padx=(55, 24), pady=(24, 4), sticky="w")
+        ctk.CTkLabel(
+            frame, text=_t("fonts_hint"), text_color="gray", font=ctk.CTkFont(size=11),
+            justify="left",
+        ).grid(row=1, column=0, padx=28, pady=(0, 8), sticky="w")
+
+        card = ctk.CTkFrame(frame)
+        card.grid(row=2, column=0, padx=24, pady=(0, 8), sticky="ew")
+        card.grid_columnconfigure(1, weight=1)
+
+        # Font row
+        ctk.CTkButton(
+            card, text=_t("fonts_select_ttf"), width=200, command=self._select_font_ttf
+        ).grid(row=0, column=0, padx=(14, 8), pady=(14, 6), sticky="w")
+        self._font_ttf_lbl = ctk.CTkLabel(
+            card, text=_t("fonts_ttf_none"), text_color="gray", anchor="w"
+        )
+        self._font_ttf_lbl.grid(row=0, column=1, padx=(0, 14), pady=(14, 6), sticky="w")
+
+        # Target row
+        ctk.CTkButton(
+            card, text=_t("fonts_select_target"), width=200, command=self._select_font_target
+        ).grid(row=1, column=0, padx=(14, 8), pady=6, sticky="w")
+        self._font_target_lbl = ctk.CTkLabel(
+            card, text=_t("fonts_target_none"), text_color="gray", anchor="w"
+        )
+        self._font_target_lbl.grid(row=1, column=1, padx=(0, 14), pady=6, sticky="w")
+
+        # Inject button
+        self._font_inject_btn = ctk.CTkButton(
+            card, text=_t("fonts_btn_inject"), height=42,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color=_BTN_DEFAULT, hover_color=_BTN_HOVER,
+            command=self._inject_font,
+        )
+        self._font_inject_btn.grid(row=2, column=0, columnspan=2, padx=14, pady=(8, 14), sticky="ew")
+
+        self._font_status_lbl = ctk.CTkLabel(
+            frame, text="", text_color="gray", font=ctk.CTkFont(size=12), justify="left"
+        )
+        self._font_status_lbl.grid(row=3, column=0, padx=28, pady=(0, 4), sticky="w")
+
+        # Live log of UnityPy operations
+        self._font_log = ctk.CTkTextbox(frame, state="disabled", font=ctk.CTkFont(size=12))
+        self._font_log.grid(row=4, column=0, padx=24, pady=(0, 16), sticky="nsew")
+
+        return frame
+
+    def _select_font_ttf(self) -> None:
+        p = filedialog.askopenfilename(
+            title=_t("fonts_select_ttf"),
+            filetypes=[("Fontes", "*.ttf *.otf"), ("Todos", "*.*")],
+        )
+        if p:
+            self._font_ttf_path = Path(p)
+            self._font_ttf_lbl.configure(text=self._font_ttf_path.name, text_color="#E0E0E0")
+
+    def _select_font_target(self) -> None:
+        p = filedialog.askopenfilename(
+            title=_t("fonts_select_target"),
+            filetypes=[("Unity assets", "*.unity3d *.assets *.bundle"), ("Todos", "*.*")],
+        )
+        if p:
+            self._font_target_path = Path(p)
+            self._font_target_lbl.configure(text=self._font_target_path.name, text_color="#E0E0E0")
+
+    def _log_font(self, msg: str) -> None:
+        self._font_log.configure(state="normal")
+        self._font_log.insert("end", msg + "\n")
+        self._font_log.see("end")
+        self._font_log.configure(state="disabled")
+
+    def _inject_font(self) -> None:
+        if not self._font_ttf_path or not self._font_ttf_path.exists():
+            self._font_status_lbl.configure(text=_t("fonts_no_ttf"), text_color="#E74C3C")
+            return
+        if not self._font_target_path or not self._font_target_path.exists():
+            self._font_status_lbl.configure(text=_t("fonts_no_target"), text_color="#E74C3C")
+            return
+
+        self._font_inject_btn.configure(state="disabled", text=_t("fonts_injecting"))
+        self._font_status_lbl.configure(text=_t("fonts_injecting"), text_color="gray")
+        ttf = self._font_ttf_path
+        target = self._font_target_path
+
+        def run():
+            try:
+                stats = inject_font(
+                    str(target), str(ttf),
+                    log_fn=lambda m: self._schedule(lambda msg=m: self._log_font(msg)),
+                )
+            except Exception as exc:
+                stats = {"replaced": 0, "bitmap": 0, "tmp": 0, "error": str(exc)}
+
+            def done():
+                self._font_inject_btn.configure(state="normal", text=_t("fonts_btn_inject"))
+                if stats.get("error"):
+                    self._font_status_lbl.configure(
+                        text=_t("fonts_error", err=stats["error"]), text_color="#E74C3C"
+                    )
+                elif stats["replaced"]:
+                    self._font_status_lbl.configure(
+                        text=_t("fonts_done", n=stats["replaced"], bmp=stats["bitmap"], tmp=stats["tmp"]),
+                        text_color="#27AE60",
+                    )
+                else:
+                    self._font_status_lbl.configure(
+                        text=_t("fonts_none", bmp=stats["bitmap"], tmp=stats["tmp"]),
+                        text_color="#E67E22",
+                    )
+
+            self._schedule(done)
+
+        threading.Thread(target=run, daemon=True).start()
 
     # ── Settings screen ──────────────────────────────────────────────
 
@@ -838,7 +1322,7 @@ class App(ctk.CTk):
         # ── Title ──────────────────────────────────────────────────────
         ctk.CTkLabel(
             frame, text=_t("screen_settings_title"), font=ctk.CTkFont(size=20, weight="bold")
-        ).grid(row=0, column=0, padx=24, pady=(24, 8), sticky="w")
+        ).grid(row=0, column=0, padx=(55, 24), pady=(24, 8), sticky="w")
 
         # ── App preferences (language) ──────────────────────────────────
         ctk.CTkLabel(
@@ -1043,65 +1527,143 @@ class App(ctk.CTk):
             self._review_set_status(_t("review_load_err", err=exc))
 
     def _render_review_cards(self, filter_text: str = "") -> None:
-        for card in self._review_cards:
-            card.destroy()
-        self._review_cards.clear()
-        self._review_textboxes.clear()
-        self._itens_exibidos = 0
+        self._review_page = 0
 
         if not self._review_cache:
+            for card in self._review_cards:
+                card.destroy()
+            self._review_cards.clear()
+            self._review_textboxes.clear()
+            self._update_pagination_ui()
             return
 
         q = filter_text.strip().lower()
         self._itens_filtrados = [
-            (o, t) for o, t in self._review_cache.items()
+            o for o, t in self._review_cache.items()
             if not q or q in o.lower() or q in t.lower()
         ]
+
+        self._render_page()
+
+    def _save_current_textbox_edits(self) -> None:
+        for original, tb in list(self._review_textboxes.items()):
+            try:
+                new_text = tb.get("1.0", "end").rstrip("\n")
+                if new_text and new_text != self._review_cache.get(original):
+                    self._review_cache[original] = new_text
+            except Exception:
+                pass
+
+    def _render_page(self) -> None:
+        # Save edits of the current page first
+        self._save_current_textbox_edits()
+
+        for card in self._review_cards:
+            card.destroy()
+        self._review_cards.clear()
+        self._review_textboxes.clear()
 
         if not self._itens_filtrados:
             lbl = ctk.CTkLabel(
                 self._review_scroll,
-                text=_t("review_no_results", q=q) if q else "",
+                text=_t("review_no_results", q=self._review_search_var.get().strip()) if self._review_search_var.get().strip() else "",
                 text_color="gray",
             )
             lbl.grid(row=0, column=0, pady=20)
             self._review_cards.append(lbl)
+            self._update_pagination_ui()
             return
 
-        self._render_next_batch()
+        total = len(self._itens_filtrados)
+        start = self._review_page * self._itens_por_pagina
+        end = min(start + self._itens_por_pagina, total)
+        batch = self._itens_filtrados[start:end]
 
-    def _render_next_batch(self) -> None:
-        start = self._itens_exibidos
-        batch = self._itens_filtrados[start : start + 50]
-        if not batch:
-            return
-
-        for original, translated in batch:
-            idx = len(self._review_cards)
+        for idx, original in enumerate(batch):
+            translated = self._review_cache.get(original, "")
             self._build_review_card(idx, original, translated)
 
-        self._itens_exibidos += len(batch)
+        # Update status info showing page range
+        self._review_set_status(
+            _t("review_status_showing", n=f"{start + 1}-{end}", total=total)
+        )
+        self._update_pagination_ui()
+
+    def _prev_page(self) -> None:
+        if self._review_page > 0:
+            self._review_page -= 1
+            self._render_page()
+            try:
+                self._review_scroll._parent_canvas.yview_moveto(0.0)
+            except Exception:
+                pass
+
+    def _next_page(self) -> None:
         total = len(self._itens_filtrados)
+        total_pages = max(1, (total + self._itens_por_pagina - 1) // self._itens_por_pagina)
+        if self._review_page + 1 < total_pages:
+            self._review_page += 1
+            self._render_page()
+            try:
+                self._review_scroll._parent_canvas.yview_moveto(0.0)
+            except Exception:
+                pass
 
-        self._review_set_status(_t("review_status_showing", n=self._itens_exibidos, total=total))
+    def _jump_to_page(self) -> None:
+        raw_val = self._page_jump_entry.get().strip()
+        total = len(self._itens_filtrados)
+        total_pages = max(1, (total + self._itens_por_pagina - 1) // self._itens_por_pagina)
+        try:
+            target_page = int(raw_val) - 1
+            if 0 <= target_page < total_pages:
+                self._review_page = target_page
+                self._render_page()
+                try:
+                    self._review_scroll._parent_canvas.yview_moveto(0.0)
+                except Exception:
+                    pass
+            else:
+                # Revert to current page on out-of-bounds
+                self._page_jump_entry.delete(0, "end")
+                self._page_jump_entry.insert(0, str(self._review_page + 1))
+        except ValueError:
+            # Revert to current page on invalid input
+            self._page_jump_entry.delete(0, "end")
+            self._page_jump_entry.insert(0, str(self._review_page + 1))
 
-        if self._itens_exibidos < total:
-            remaining = total - self._itens_exibidos
-            load_btn = ctk.CTkButton(
-                self._review_scroll,
-                text=_t("review_load_more", n=remaining),
-                fg_color="#2B2B36",
-                hover_color="#3D3D50",
-                command=self._load_more_cards,
-            )
-            load_btn.grid(row=len(self._review_cards), column=0, padx=4, pady=8, sticky="ew")
-            self._review_cards.append(load_btn)
+    def _update_pagination_ui(self) -> None:
+        total = len(self._itens_filtrados)
+        total_pages = max(1, (total + self._itens_por_pagina - 1) // self._itens_por_pagina)
 
-    def _load_more_cards(self) -> None:
-        if self._review_cards:
-            self._review_cards[-1].destroy()
-            self._review_cards.pop()
-        self._render_next_batch()
+        # Keep page within bounds
+        if self._review_page >= total_pages:
+            self._review_page = total_pages - 1
+        if self._review_page < 0:
+            self._review_page = 0
+
+        current_page = self._review_page + 1
+
+        # Update labels and fields
+        self._lbl_page_total.configure(text=_t("review_page_info_of", total=total_pages))
+        self._page_jump_entry.delete(0, "end")
+        self._page_jump_entry.insert(0, str(current_page))
+
+        # Enable/disable buttons
+        if self._review_page > 0:
+            self._btn_prev.configure(state="normal")
+        else:
+            self._btn_prev.configure(state="disabled")
+
+        if current_page < total_pages:
+            self._btn_next.configure(state="normal")
+        else:
+            self._btn_next.configure(state="disabled")
+
+        # Show pagination if more than 1 page
+        if total_pages > 1:
+            self._pag_frame.grid()
+        else:
+            self._pag_frame.grid_remove()
 
     def _build_review_card(self, idx: int, original: str, translated: str) -> None:
         card = ctk.CTkFrame(self._review_scroll, fg_color="#1E1E24", corner_radius=10)
@@ -1159,20 +1721,27 @@ class App(ctk.CTk):
             self._review_set_status(_t("review_no_path"))
             return
 
-        updated = 0
-        for original, tb in self._review_textboxes.items():
-            new_text = tb.get("1.0", "end").rstrip("\n")
-            if new_text and new_text != self._review_cache.get(original):
-                self._review_cache[original] = new_text
-                updated += 1
+        self._save_current_textbox_edits()
 
         try:
             raw = self._review_path.read_text(encoding="utf-8")
             existing = json.loads(raw)
             if isinstance(existing, dict) and "texts" in existing:
+                orig_cache = existing["texts"]
+            else:
+                orig_cache = existing
+
+            updated = 0
+            if isinstance(orig_cache, dict):
+                for k, v in self._review_cache.items():
+                    if v != orig_cache.get(k):
+                        updated += 1
+
+            if isinstance(existing, dict) and "texts" in existing:
                 out = {**existing, "texts": self._review_cache}
             else:
                 out = self._review_cache
+
             self._review_path.write_text(
                 json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -1181,6 +1750,62 @@ class App(ctk.CTk):
             )
         except Exception as exc:
             self._review_set_status(_t("review_save_err", err=exc))
+
+    # ── CSV export / import (Pillar 4) ───────────────────────────────────
+
+    def _export_csv(self) -> None:
+        self._save_current_textbox_edits()
+        if not self._review_cache:
+            self._review_set_status(_t("review_bulk_no_cache"))
+            return
+        path = filedialog.asksaveasfilename(
+            title=_t("review_btn_export_csv"),
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv")],
+            initialfile="traducoes.csv",
+        )
+        if not path:
+            return
+        try:
+            # utf-8-sig → Excel reads accents correctly without manual import.
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Original", "Traduzido"])
+                for original, translated in self._review_cache.items():
+                    writer.writerow([original, translated])
+            self._review_set_status(
+                _t("review_csv_exported", n=len(self._review_cache), name=Path(path).name)
+            )
+        except Exception as exc:
+            self._review_set_status(_t("review_csv_err", err=exc))
+
+    def _import_csv(self) -> None:
+        path = filedialog.askopenfilename(
+            title=_t("review_btn_import_csv"),
+            filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+        )
+        if not path:
+            return
+        # Persist in-progress edits before mutating the cache.
+        self._save_current_textbox_edits()
+        try:
+            with open(path, "r", newline="", encoding="utf-8-sig") as f:
+                rows = list(csv.reader(f))
+            start = 1 if rows and rows[0][:2] == ["Original", "Traduzido"] else 0
+            updated = 0
+            for row in rows[start:]:
+                if len(row) < 2:
+                    continue
+                original, translated = row[0], row[1]
+                if original and translated and self._review_cache.get(original) != translated:
+                    self._review_cache[original] = translated
+                    updated += 1
+            self._render_review_cards(self._review_search_var.get())
+            self._review_set_status(
+                _t("review_csv_imported", n=updated, name=Path(path).name)
+            )
+        except Exception as exc:
+            self._review_set_status(_t("review_csv_err", err=exc))
 
     def _translate_card_google(
         self, original: str, textbox: ctk.CTkTextbox, btn: ctk.CTkButton
@@ -1254,6 +1879,125 @@ class App(ctk.CTk):
             self._schedule(done)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _iniciar_revisao_em_massa(self) -> None:
+        if self._bulk_review_running:
+            self._bulk_review_stop = True
+            return
+
+        if not self._review_cache:
+            self._review_set_status(_t("review_bulk_no_cache"))
+            return
+
+        cfg = _load_config()
+        model = cfg.get("ai_model", "").strip()
+        api_key = cfg.get("ai_api_key", "").strip()
+        base_url = cfg.get("ai_base_url", "").strip()
+
+        if not model:
+            messagebox.showwarning(_t("warn_no_model_title"), _t("warn_no_model_msg"))
+            return
+
+        is_local = model.startswith("ollama/") or "localhost" in model or "127.0.0.1" in (base_url or "")
+        if not is_local and not api_key:
+            messagebox.showwarning(_t("warn_no_apikey_title"), _t("warn_no_apikey_msg"))
+            return
+
+        self._bulk_review_running = True
+        self._bulk_review_stop = False
+        self._bulk_btn.configure(text=_t("review_bulk_running"), fg_color="#7D3C98", hover_color="#9B59B6")
+        self._bulk_progress_bar.set(0)
+        self._bulk_progress_lbl.configure(text="")
+        self._bulk_progress_frame.grid()
+
+        threading.Thread(target=self._executar_revisao_em_massa, daemon=True).start()
+
+    def _executar_revisao_em_massa(self) -> None:
+        from translators.engine import refazer_com_ia_litellm
+        cfg = _load_config()
+        model = cfg.get("ai_model", "").strip()
+        api_key = cfg.get("ai_api_key", "").strip()
+        base_url = cfg.get("ai_base_url", "").strip()
+        src_lang = LANGUAGES.get(self.src_var.get(), "en")
+        tgt_lang = LANGUAGES.get(self.tgt_var.get(), "pt")
+
+        items = list(self._review_cache.items())
+        total = len(items)
+        updated = 0
+
+        for i, (original, current_text) in enumerate(items):
+            if self._bulk_review_stop:
+                break
+            try:
+                result = refazer_com_ia_litellm(
+                    texto_original=original,
+                    src_lang=src_lang,
+                    tgt_lang=tgt_lang,
+                    model_name=model,
+                    api_key=api_key,
+                    base_url=base_url,
+                )
+                if result and result != current_text:
+                    self._review_cache[original] = result
+                    updated += 1
+                    self._schedule(lambda o=original, r=result: self._update_visible_card(o, r))
+            except Exception:
+                pass
+
+            done = i + 1
+            progress = done / total
+            self._schedule(lambda p=progress, d=done, t=total: (
+                self._bulk_progress_bar.set(p),
+                self._bulk_progress_lbl.configure(
+                    text=_t("review_bulk_progress", done=d, total=t)
+                ),
+            ))
+
+            if done % 20 == 0:
+                self._save_review_auto()
+                n = done
+                self._schedule(
+                    lambda n=n: self._review_set_status(_t("review_bulk_saving", n=n))
+                )
+
+            time.sleep(1.5)
+
+        self._save_review_auto()
+        n_updated = updated
+
+        def _finish():
+            self._bulk_review_running = False
+            self._bulk_review_stop = False
+            self._bulk_btn.configure(
+                text=_t("review_btn_bulk"), fg_color="#6C3483", hover_color="#8E44AD"
+            )
+            self._bulk_progress_bar.set(1.0)
+            self._bulk_progress_lbl.configure(text=_t("review_bulk_done", n=n_updated))
+            self._review_set_status(_t("review_bulk_done", n=n_updated))
+
+        self._schedule(_finish)
+
+    def _save_review_auto(self) -> None:
+        if not self._review_path:
+            return
+        try:
+            raw = self._review_path.read_text(encoding="utf-8")
+            existing = json.loads(raw)
+            if isinstance(existing, dict) and "texts" in existing:
+                out = {**existing, "texts": self._review_cache}
+            else:
+                out = self._review_cache
+            self._review_path.write_text(
+                json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    def _update_visible_card(self, original: str, result: str) -> None:
+        tb = self._review_textboxes.get(original)
+        if tb:
+            tb.delete("1.0", "end")
+            tb.insert("1.0", result)
 
     # ------------------------------------------------------------------
     # Thread-safe UI queue
@@ -1602,6 +2346,43 @@ class App(ctk.CTk):
                 self._schedule(fail)
 
         threading.Thread(target=run, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Keyboard shortcuts / Hotkeys
+    # ------------------------------------------------------------------
+
+    def _is_typing_active(self) -> bool:
+        widget = self.focus_get()
+        if widget is None:
+            return False
+        cls_name = widget.__class__.__name__.lower()
+        if "entry" in cls_name or "text" in cls_name:
+            return True
+        return False
+
+    def _on_arrow_left(self, event) -> None:
+        if getattr(self, "_current_screen", "") == "review" and not self._is_typing_active():
+            self._prev_page()
+
+    def _on_arrow_right(self, event) -> None:
+        if getattr(self, "_current_screen", "") == "review" and not self._is_typing_active():
+            self._next_page()
+
+    def _on_window_resize(self, event):
+        if event.widget == self:
+            current_size = (event.width, event.height)
+            if current_size == self._tamanho_anterior:
+                return
+            self._tamanho_anterior = current_size
+
+            if self._resize_timer is not None:
+                self.after_cancel(self._resize_timer)
+            self._resize_timer = self.after(250, self._on_resize_stopped)
+
+    def _on_resize_stopped(self):
+        self._resize_timer = None
+        if getattr(self, "_current_screen", "") == "review":
+            self._render_page()
 
 
 # ---------------------------------------------------------------------------

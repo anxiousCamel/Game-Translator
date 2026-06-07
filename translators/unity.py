@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import os
 import re
 import shutil
 import time
@@ -7,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from .base import BaseTranslator
-from .engine import ensure_model, translate_texts
+from .engine import (
+    ensure_model, translate_texts,
+    load_glossary, mask_glossary, unmask_glossary,
+    mask_code_vars, unmask_code_vars,
+)
 
 # ---------------------------------------------------------------------------
 # Text filtering
@@ -77,6 +82,12 @@ _HALLUCINATIONS: frozenset[str] = frozenset({
     "i don't know",
 })
 
+def _atomic_save_cache(cache_file: Path, cache: dict) -> None:
+    tmp = cache_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(str(tmp), str(cache_file))
+
+
 # File names that must never be modified (Unity engine config, not game text)
 _SKIP_FILENAMES = frozenset({
     "UnityServicesProjectConfiguration.json",
@@ -141,24 +152,6 @@ _SKIP_OBJ_TYPES = frozenset({
 
 _UNITY_EXTS = frozenset({".assets", ".unity3d", ".bundle"})
 _TEXT_EXTS  = frozenset({".json", ".csv", ".txt"})
-
-
-def _mask_tags(s: str) -> tuple[str, list[str]]:
-    """Replace <...> tags with [T0], [T1],... tokens. Returns (masked_str, original_tags)."""
-    tags: list[str] = []
-
-    def _replacer(m: re.Match) -> str:
-        tags.append(m.group(0))
-        return f"[T{len(tags) - 1}]"
-
-    return _TAG_RE.sub(_replacer, s), tags
-
-
-def _unmask_tags(s: str, tags: list[str]) -> str:
-    """Restore [T0], [T1],... tokens back to their original tags."""
-    for idx, tag in enumerate(tags):
-        s = s.replace(f"[T{idx}]", tag)
-    return s
 
 
 def _looks_translatable(s: str) -> bool:
@@ -394,20 +387,40 @@ def _detect_unity_version(env: Any) -> str | None:
     Extract Unity version string from a loaded UnityPy Environment.
     Checks inner files (BundleFile wrapping SerializedFiles) and direct SerializedFiles.
     Returns e.g. "2021.3.45f2" or None.
+
+    UnityPy ≥1.25.0 stores unity_version as a UnityVersion object (not plain str);
+    str() converts it safely in both old and new versions.
     """
     for f in env.files.values():
         # Direct SerializedFile
         v = getattr(f, "unity_version", None)
         if v:
-            return v
+            return str(v)
         # BundleFile wrapping inner SerializedFiles
         inner = getattr(f, "files", None)
         if inner:
             for inner_f in inner.values():
                 v = getattr(inner_f, "unity_version", None)
                 if v:
-                    return v
+                    return str(v)
     return None
+
+
+def _ta_read(data: Any) -> str:
+    """Read TextAsset content. UnityPy ≥1.25.0 uses m_Script; older used .text."""
+    raw = getattr(data, "m_Script", None) or getattr(data, "text", None) or ""
+    if isinstance(raw, (bytes, bytearray)):
+        return raw.decode("utf-8", errors="replace")
+    return raw
+
+
+def _ta_write(data: Any, content: str) -> None:
+    """Write TextAsset content back. Matches the type (bytes/str) of the original field."""
+    orig = getattr(data, "m_Script", None)
+    if orig is not None:
+        data.m_Script = content.encode("utf-8") if isinstance(orig, (bytes, bytearray)) else content
+    else:
+        data.text = content
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +487,86 @@ def _load_env_with_generator(path: Path, generator) -> Any:
         env.typetree_generator = generator
     env.load_file(str(path))
     return env
+
+
+# ---------------------------------------------------------------------------
+# Pillar 1 — Font injector (Anti-Tofu)
+# ---------------------------------------------------------------------------
+
+def inject_font(asset_path: str, ttf_path: str, log_fn=print) -> dict:
+    """
+    Replace the glyph data of dynamic legacy Font assets inside a Unity file
+    (data.unity3d / sharedassets*.assets / *.bundle) with a user .ttf/.otf.
+
+    SCOPE — be honest about what this fixes:
+      • Dynamic Font (non-empty m_FontData): the OS rasterizes glyphs at runtime,
+        so swapping the embedded .ttf makes accents (ç ã é) render. THIS is the
+        Anti-Tofu fix and what gets replaced.
+      • Bitmap Font (empty m_FontData, atlas texture): glyphs are baked into a
+        texture — a byte swap does nothing. Counted and reported, not changed.
+      • TMP_FontAsset (SDF atlas, MonoBehaviour): needs full SDF atlas
+        regeneration, out of scope for a byte swap. Detected and reported only.
+
+    Returns stats: {"replaced": int, "bitmap": int, "tmp": int, "error": str|None}.
+    Backs up the original to <file>.fontbak before overwriting.
+    """
+    import UnityPy as unitypy
+
+    stats = {"replaced": 0, "bitmap": 0, "tmp": 0, "error": None}
+    try:
+        ttf_bytes = Path(ttf_path).read_bytes()
+    except Exception as e:
+        stats["error"] = f"Falha ao ler a fonte: {e}"
+        return stats
+
+    asset = Path(asset_path)
+    try:
+        env = unitypy.load(str(asset))
+    except Exception as e:
+        stats["error"] = f"Falha ao abrir {asset.name}: {e}"
+        return stats
+
+    for obj in env.objects:
+        tname = obj.type.name
+        try:
+            if tname == "Font":
+                data = obj.read()
+                if getattr(data, "m_FontData", None):
+                    data.m_FontData = ttf_bytes
+                    data.save()
+                    stats["replaced"] += 1
+                    log_fn(f"  + Fonte dinamica substituida: {getattr(data, 'm_Name', '?')}")
+                else:
+                    stats["bitmap"] += 1
+                    log_fn(f"  - Fonte bitmap (atlas) ignorada: {getattr(data, 'm_Name', '?')}")
+            elif tname == "MonoBehaviour":
+                # Best-effort TMP_FontAsset detection (no typetree generator needed).
+                try:
+                    tree = obj.read_typetree()
+                    if isinstance(tree, dict) and ("m_AtlasTextures" in tree or "m_FaceInfo" in tree):
+                        stats["tmp"] += 1
+                        log_fn(f"  ! TMP_FontAsset detectada (SDF): {tree.get('m_Name', '?')} — requer regeneracao de atlas, ignorada.")
+                except Exception:
+                    pass
+        except Exception:
+            continue
+
+    if stats["replaced"]:
+        try:
+            if not env.files:
+                stats["error"] = "Nenhum SerializedFile no arquivo."
+                return stats
+            file_obj = next(iter(env.files.values()))
+            # Serialize BEFORE touching dst so a save error never truncates the game file.
+            raw_bytes = file_obj.save()
+            bak = Path(str(asset) + ".fontbak")
+            if not bak.exists():
+                shutil.copy2(asset, bak)
+            with open(asset, "wb") as f:
+                f.write(raw_bytes)
+        except Exception as e:
+            stats["error"] = f"Falha ao salvar {asset.name}: {e}"
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -551,15 +644,13 @@ class UnityTranslator(BaseTranslator):
             self.log(f"    [aviso] {path.name}: {e}")
             return 0
 
-        for i, obj in enumerate(env.objects):
-            if i % 50 == 0:
-                time.sleep(0.001)
+        for obj in env.objects:
             if obj.type.name in _SKIP_OBJ_TYPES:
                 continue
             try:
                 if obj.type.name == "TextAsset":
                     data = obj.read()
-                    raw: str = getattr(data, "text", "") or ""
+                    raw: str = _ta_read(data)
                     if not raw.strip():
                         continue
                     if raw.lstrip()[:1] in ("{", "["):
@@ -614,15 +705,13 @@ class UnityTranslator(BaseTranslator):
         except Exception:
             return False
 
-        for i, obj in enumerate(env.objects):
-            if i % 50 == 0:
-                time.sleep(0.001)
+        for obj in env.objects:
             if obj.type.name in _SKIP_OBJ_TYPES:
                 continue
             try:
                 if obj.type.name == "TextAsset":
                     data = obj.read()
-                    raw: str = getattr(data, "text", "") or ""
+                    raw: str = _ta_read(data)
                     if not raw.strip():
                         continue
                     if raw.lstrip()[:1] in ("{", "["):
@@ -633,7 +722,7 @@ class UnityTranslator(BaseTranslator):
                             new_parsed = _patch(parsed, cache)
                             new_raw = json.dumps(new_parsed, ensure_ascii=False, separators=(",", ":"))
                             if new_raw != raw:
-                                data.text = new_raw
+                                _ta_write(data, new_raw)
                                 data.save()
                                 modified = True
                             continue
@@ -641,7 +730,7 @@ class UnityTranslator(BaseTranslator):
                             pass
                     new_text, ta_changed = _apply_text_blocks(raw, cache)
                     if ta_changed:
-                        data.text = new_text
+                        _ta_write(data, new_text)
                         data.save()
                         modified = True
 
@@ -665,10 +754,10 @@ class UnityTranslator(BaseTranslator):
                 if not env.files:
                     return False
                 file_obj = next(iter(env.files.values()))
-                # Serialize BEFORE opening dst to avoid truncating it on save error
                 raw_bytes = file_obj.save()
-                with open(dst, "wb") as f:
-                    f.write(raw_bytes)
+                tmp = dst.with_suffix(dst.suffix + ".tmp")
+                tmp.write_bytes(raw_bytes)
+                os.replace(str(tmp), str(dst))
             except Exception as e:
                 self.log(f"    [erro] Nao foi possivel salvar {dst.name}: {e}")
                 return False
@@ -685,14 +774,18 @@ class UnityTranslator(BaseTranslator):
                 new_parsed = _patch(parsed, cache)
                 new_raw = json.dumps(new_parsed, ensure_ascii=False, indent=2)
                 if new_raw != raw:
-                    dst.write_text(new_raw, encoding="utf-8")
+                    tmp = dst.with_suffix(dst.suffix + ".tmp")
+                    tmp.write_text(new_raw, encoding="utf-8")
+                    os.replace(str(tmp), str(dst))
                     return True
                 return False
             except json.JSONDecodeError:
                 pass
         new_text, changed = _apply_text_blocks(raw, cache)
         if changed:
-            dst.write_text(new_text, encoding="utf-8")
+            tmp = dst.with_suffix(dst.suffix + ".tmp")
+            tmp.write_text(new_text, encoding="utf-8")
+            os.replace(str(tmp), str(dst))
             return True
         return False
 
@@ -763,6 +856,11 @@ class UnityTranslator(BaseTranslator):
             except Exception:
                 pass
 
+        # Pillar 2 — fixed-term glossary (applied to the offline batch below).
+        glossary = load_glossary(force=True)
+        if glossary:
+            self.log(f"Glossario: {len(glossary)} termos fixos carregados.")
+
         asset_entries = list(self._iter_asset_files(data_dir))
         self.log(f"Arquivos a processar: {len(asset_entries)}")
 
@@ -825,13 +923,16 @@ class UnityTranslator(BaseTranslator):
             for i in range(0, total, batch_size):
                 batch = to_translate[i : i + batch_size]
 
-                # Step 1 — mask Rich Text tags so the model never sees <size=10> etc.
+                # Step 1 — mask code variables (<tags>, {0}, %VAR%) then glossary terms.
                 masked_strs: list[str] = []
                 tag_maps:    list[list[str]] = []
+                gloss_maps:  list[list[str]] = []
                 for s in batch:
-                    masked, tags = _mask_tags(s)
+                    masked, tags = mask_code_vars(s)
+                    masked, gloss = mask_glossary(masked, glossary)
                     masked_strs.append(masked)
                     tag_maps.append(tags)
+                    gloss_maps.append(gloss)
 
                 # Step 2 — mask \n so the neural model doesn't destroy line breaks
                 safe_batch = [
@@ -847,10 +948,10 @@ class UnityTranslator(BaseTranslator):
                     for t in translated_safe
                 ]
 
-                # Step 4 — restore Rich Text tags
+                # Step 4 — restore glossary terms, then Rich Text tags / variables
                 translated_tagged = [
-                    _unmask_tags(t, tags)
-                    for t, tags in zip(translated_unmasked, tag_maps)
+                    unmask_code_vars(unmask_glossary(t, gloss), tags)
+                    for t, tags, gloss in zip(translated_unmasked, tag_maps, gloss_maps)
                 ]
 
                 # Step 5 — anti-hallucination: discard known bad outputs
@@ -860,12 +961,9 @@ class UnityTranslator(BaseTranslator):
                 ]
 
                 cache.update(zip(batch, translated))
-                time.sleep(0.01)  # yield GIL to Tkinter thread between batches
-                cache_file.write_text(
-                    json.dumps(cache, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
                 done = min(i + batch_size, total)
+                if done % 500 < batch_size or done >= total:
+                    _atomic_save_cache(cache_file, cache)
                 self.set_progress(
                     0.25 + 0.55 * done / total,
                     f"Traduzindo... {done}/{total}",
